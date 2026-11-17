@@ -160,6 +160,13 @@ cd firmware && pio run -e diag -t upload && pio device monitor
 It tries every way the mic could be connected and reports which one is live.
 Put those pins into `MIC_*` in `firmware/src/main.cpp`.
 
+**Other ESP32 boards on the same computer.** eve's app asks each board once
+whether it's eve, then remembers eve's USB serial number in
+`~/.config/eve/device` and never opens any other board. That leaves them free
+for atech.dev, PlatformIO, and so on. In a browser's port picker, eve shows up as
+"USB JTAG/serial debug unit". If you move eve to a different Tiny board, run
+with `--forget-device` once.
+
 **Slow.** Transcription time depends on CPU speed. Laptops often throttle on a
 low battery or a weak charger. Stay on `base.en`, or try `--model tiny.en`.
 

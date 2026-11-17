@@ -39,7 +39,7 @@ BYTES_PER_SEC = SAMPLE_RATE * 2
 MAGIC = b"\xa5\x5a"
 ESPRESSIF_VID = 0x303A
 MAX_PAYLOAD = 4096
-PACKET_TYPES = b"SDEANT"
+PACKET_TYPES = b"SDEANTH"
 STALL_SECONDS = 3.0  # a recording with no packets this long is finalized anyway
 
 CLEAR_LINES = 6  # Ctrl+U presses when clearing a prompt; each clears one line
@@ -53,10 +53,78 @@ log = logging.getLogger("voicetype")
 
 
 # ---------------------------------------------------------------- serial link
-def find_port() -> str | None:
-    for p in list_ports.comports():
-        if p.vid == ESPRESSIF_VID:
+DEVICE_FILE = os.path.expanduser("~/.config/eve/device")   # eve's USB serial number
+
+
+def known_serial() -> str | None:
+    try:
+        with open(DEVICE_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def remember_serial(sn: str) -> None:
+    os.makedirs(os.path.dirname(DEVICE_FILE), exist_ok=True)
+    with open(DEVICE_FILE, "w") as f:
+        f.write(sn + "\n")
+
+
+def probe(device: str) -> bool:
+    """Ask the device on `device` whether it is eve ('?' -> 'H' packet)."""
+    try:
+        s = open_port(device)
+    except (serial.SerialException, OSError):
+        return False            # busy (e.g. a browser is flashing it) or gone
+    try:
+        s.write_timeout = 0.5   # a board that isn't reading must not hang us
+        s.reset_input_buffer()
+        buf = bytearray()
+        # eve can take a moment after the port opens before it reads, so ask
+        # a few times.
+        deadline = time.time() + 2.0
+        next_ask = 0.0
+        while time.time() < deadline:
+            if time.time() >= next_ask:
+                try:
+                    s.write(b"?")
+                except serial.SerialTimeoutException:
+                    pass
+                next_ask = time.time() + 0.3
+            buf += s.read(256)
+            if any(t == "H" and p == b"eve" for t, p in parse_packets(buf)):
+                return True
+        return False
+    except (serial.SerialException, OSError):
+        return False
+    finally:
+        s.reset_output_buffer()   # drop unsent bytes so close() doesn't wait on them
+        s.close()
+
+
+def find_port(not_eve: set) -> str | None:
+    """Find eve among the connected ESP32 boards.
+
+    Once eve's serial number is known, only that device is ever opened, so
+    other Atech boards stay free for atech.dev, PlatformIO and so on. Until
+    then each unknown board is asked once whether it is eve; boards that
+    say no are left alone for the rest of the session."""
+    ports = [p for p in list_ports.comports() if p.vid == ESPRESSIF_VID]
+    known = known_serial()
+    if known:
+        return next((p.device for p in ports if p.serial_number == known), None)
+    for p in ports:
+        key = p.serial_number or p.device
+        if key in not_eve:
+            continue
+        if probe(p.device):
+            if p.serial_number:
+                remember_serial(p.serial_number)
+                log.info("found eve (USB serial %s); other boards will be left alone",
+                         p.serial_number)
             return p.device
+        not_eve.add(key)
+        log.info("%s (%s) is not eve; leaving it alone", p.device, p.product or "?")
     return None
 
 
@@ -65,11 +133,14 @@ def open_port(device: str) -> serial.Serial:
     s.port = device
     s.baudrate = 115200
     s.timeout = 0.1
-    # Keep DTR/RTS low: on the ESP32-S3's USB-Serial-JTAG, some DTR/RTS
-    # combinations reset the chip.
-    s.dtr = False
-    s.rts = False
+    s.exclusive = True   # nothing else (e.g. a browser) can open eve's port while we hold it
+    # On the ESP32-S3's USB-Serial-JTAG, DTR low + RTS high resets the chip.
+    # Linux raises both lines on open; letting pyserial drop DTR first would
+    # pass through that state and reboot eve. So open with both high, then
+    # drop RTS before DTR.
     s.open()
+    s.rts = False
+    s.dtr = False
     return s
 
 
@@ -382,8 +453,9 @@ class App:
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
         waiting_logged = False
+        not_eve: set = set()
         while True:
-            device = self.args.port or find_port()
+            device = self.args.port or find_port(not_eve)
             if not device:
                 if not waiting_logged:
                     log.info("waiting for the voice stick to be plugged in...")
@@ -475,7 +547,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=os.environ.get("VOICETYPE_MODEL", "base.en"),
                     help="faster-whisper model: tiny.en, base.en (default), small.en (more accurate, ~3x slower), medium.en")
-    ap.add_argument("--port", help="serial device (default: auto-detect the ESP32-S3)")
+    ap.add_argument("--port", help="serial device (default: find eve among the connected boards)")
+    ap.add_argument("--forget-device", action="store_true",
+                    help="forget which board is eve (after swapping its Tiny board) and search again")
     ap.add_argument("--enter", action="store_true", help="press Enter when you release the button (sends it to Claude)")
     ap.add_argument("--no-live", action="store_true", help="type everything at once on release instead of phrase by phrase")
     ap.add_argument("--pause", type=float, default=0.4,
@@ -488,6 +562,11 @@ def main() -> None:
     ap.add_argument("--save-wav", metavar="PATH", help="save each recording (debugging the mic)")
     ap.add_argument("-v", "--verbose", action="store_true", help="also show device log lines")
     args = ap.parse_args()
+    if args.forget_device:
+        try:
+            os.remove(DEVICE_FILE)
+        except FileNotFoundError:
+            pass
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")

@@ -24,6 +24,8 @@
  * Host -> device (single bytes, drive the button light):
  *   'B' busy/transcribing (amber)   'K' done (green flash)
  *   'X' error (red flash)           'I' idle (off)
+ *   '?' identify: the device answers with an 'H' packet. The host uses this
+ *       to tell eve apart from other ESP32 boards on the same computer.
  */
 
 #include <Arduino.h>
@@ -146,6 +148,10 @@ static void serviceLight() {
 static void readHost() {
     while (Serial.available() > 0) {
         int c = Serial.read();
+        if (c == '?') {                             // "who are you?" from the host
+            sendPacket('H', (const uint8_t*)"eve", 3);
+            continue;
+        }
         if (lightState == L_RECORDING) continue;    // recording owns the light
         switch (c) {
             case 'B': setLight(L_BUSY);   break;
