@@ -185,7 +185,14 @@ class LocalWhisper:
 
         log.info("loading whisper model %r (first run downloads it)...", model)
         t0 = time.time()
-        self.model = WhisperModel(model, device="cpu", compute_type="int8", cpu_threads=threads)
+        opts = dict(device="cpu", compute_type="int8", cpu_threads=threads)
+        try:
+            # Use the downloaded copy without touching the network, so eve
+            # starts the same with or without internet.
+            self.model = WhisperModel(model, local_files_only=True, **opts)
+        except Exception:
+            log.info("model not downloaded yet; fetching it (needs internet, once)")
+            self.model = WhisperModel(model, **opts)
         self.prompt = prompt
         log.info("model ready in %.1fs", time.time() - t0)
 
