@@ -42,6 +42,8 @@ MAX_PAYLOAD = 4096
 PACKET_TYPES = b"SDEANT"
 STALL_SECONDS = 3.0  # a recording with no packets this long is finalized anyway
 
+CLEAR_LINES = 6  # Ctrl+U presses when clearing a prompt; each clears one line
+
 DEFAULT_PROMPT = (
     "Dictation for a coding assistant in a terminal. Claude, Claude Code, git, "
     "GitHub, Python, TypeScript, JSON, API, CLI, README, npm, pip, ESP32, Atech."
@@ -298,7 +300,8 @@ class App:
 
     def gesture(self, kind: str) -> None:
         """Single tap: Enter if eve has typed unsent text, else Tab (accepts
-        Claude Code's suggestion). Double tap: delete eve's unsent text."""
+        Claude Code's suggestion). Double tap: delete eve's unsent text, or
+        clear the whole prompt if a Tab put a suggestion there."""
         try:
             if kind == "tap":
                 # A Tab fills in Claude Code's suggestion, so after one there is
@@ -312,6 +315,21 @@ class App:
                     press_key(key)
                 self.unsent = 0
                 self.tabbed = not send
+            elif self.tabbed:
+                # eve can't know how long the accepted suggestion is, so clear
+                # the whole prompt the documented Claude Code way: Ctrl+E to the
+                # line end, then Ctrl+U (delete to line start) repeated, which
+                # also clears multi-line input. Not Esc Esc: on an empty prompt
+                # that opens the rewind menu.
+                log.info("double tap -> clear the prompt (suggestion%s)",
+                         f" + {self.unsent} dictated characters" if self.unsent else "")
+                if self.args.dry_run:
+                    print("[clear prompt]", flush=True)
+                else:
+                    press_key("ctrl+e")
+                    press_key("ctrl+u", repeat=CLEAR_LINES)
+                self.unsent = 0
+                self.tabbed = False
             elif self.unsent:
                 log.info("double tap -> delete %d characters", self.unsent)
                 if self.args.dry_run:

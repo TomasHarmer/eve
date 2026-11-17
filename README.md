@@ -67,12 +67,13 @@ no soldering:
 | **Hold** the button and talk | types each phrase as you pause |
 | **Let go** | finishes and types the last phrase |
 | **Tap** | presses **Enter** to send what eve typed. With nothing waiting, presses **Tab** to accept Claude Code's suggestion, and the next tap sends it |
-| **Double-tap** | deletes the text eve typed that hasn't been sent yet |
+| **Double-tap** | deletes the text eve typed that hasn't been sent yet. After a Tab, clears the whole prompt, suggestion included |
 
 A tap waits about a third of a second to make sure it isn't a double-tap.
 eve only tracks text it typed itself: if you type or edit by hand in between,
 a tap still sees "nothing waiting", and a double-tap deletes only as many
-characters as eve typed.
+characters as eve typed. Clearing after a Tab uses Claude Code's Ctrl+U, so it
+clears everything in the prompt.
 
 The button light shows what's happening:
 
