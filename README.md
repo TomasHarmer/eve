@@ -183,7 +183,8 @@ Wayland typer, or a cloud speech backend.
 
 Made with [**Atech**](https://atech.dev) hardware modules. Speech recognition by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and OpenAI's Whisper
-models, with Silero VAD for phrase detection.
+models, with Silero VAD for phrase detection. The logo is set in
+[Montserrat](https://github.com/JulietaUla/Montserrat) ExtraLight (SIL Open Font License).
 
 ## License
 
