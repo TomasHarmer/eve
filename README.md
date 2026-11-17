@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Talk to your computer from across the room.</b><br>
+  <b>Finally, a good reason to talk to yourself.</b><br>
   A pocket push-to-talk stick that types what you say wherever your cursor is.
 </p>
 
