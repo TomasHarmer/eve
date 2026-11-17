@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <title>eve</title>
+  <defs>
+    <!-- night-sky card so the pale letters read on both light and dark pages -->
+    <radialGradient id="sky" cx="50%" cy="46%" r="75%">
+      <stop offset="0" stop-color="#14325a"/>
+      <stop offset="0.55" stop-color="#0b1c36"/>
+      <stop offset="1" stop-color="#060f20"/>
+    </radialGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#bfe6ff"/>
+    </linearGradient>
+    <linearGradient id="wispA" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9fd8ff" stop-opacity="0"/>
+      <stop offset="0.45" stop-color="#bfe6ff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#e8f6ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="wispB" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8f6ff" stop-opacity="0"/>
+      <stop offset="0.6" stop-color="#8fd0ff" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#8fd0ff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-60%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <filter id="haze" x="-20%" y="-50%" width="140%" height="200%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="48" fill="url(#sky)"/>
+  <ellipse cx="640" cy="330" rx="330" ry="120" fill="#5fb6ff" opacity="0.10" filter="url(#glow)"/>
+
+  <!-- wisps of light drifting around the letters -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M250 440 C 460 520, 820 500, 1010 300" stroke="url(#wispA)" stroke-width="3" filter="url(#haze)"/>
+    <path d="M300 455 C 520 520, 800 505, 960 360" stroke="url(#wispA)" stroke-width="1.5"/>
+    <path d="M330 215 C 520 150, 780 160, 960 230" stroke="url(#wispB)" stroke-width="2.5" filter="url(#haze)"/>
+    <path d="M380 200 C 560 160, 740 170, 880 205" stroke="url(#wispB)" stroke-width="1.2"/>
+  </g>
+  <g fill="#e8f6ff">
+    <circle cx="1004" cy="296" r="3" opacity="0.9"/>
+    <circle cx="1030" cy="262" r="1.6" opacity="0.6"/>
+    <circle cx="318" cy="222" r="1.8" opacity="0.6"/>
+    <circle cx="286" cy="430" r="1.4" opacity="0.5"/>
+  </g>
+
+  <!-- the letters: hand-drawn thin strokes, no font needed -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#7cc8ff" stroke-width="16" opacity="0.55" filter="url(#glow)">
+      <path d="M390 320 H530 A70 70 0 1 0 513.6 365"/>
+      <path d="M575 250 L640 390 L705 250"/>
+      <path d="M750 320 H890 A70 70 0 1 0 873.6 365"/>
+    </g>
+    <g stroke="url(#ink)" stroke-width="7">
+      <path d="M390 320 H530 A70 70 0 1 0 513.6 365"/>
+      <path d="M575 250 L640 390 L705 250"/>
+      <path d="M750 320 H890 A70 70 0 1 0 873.6 365"/>
+    </g>
+  </g>
+</svg>
