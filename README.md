@@ -17,7 +17,7 @@
 
 **eve** is a tiny USB-C voice stick. You hold its button and talk, and your
 words appear in the window that has your cursor: a terminal, an editor, a chat
-box. A **double-tap** presses Enter.
+box. A **double-tap** presses Enter, or Tab when there's nothing to send.
 
 It was built for driving AI coding sessions (Claude Code and friends) while
 walking around with the laptop open, so you don't have to stop and type. It
@@ -26,7 +26,7 @@ works in any app.
 - **Live:** each phrase is typed as soon as you pause. You don't have to let go first.
 - **Private:** speech recognition runs on your own computer with
   [faster-whisper](https://github.com/SYSTRAN/faster-whisper). No audio leaves the machine.
-- **Hands-free Enter:** double-tap the button to send.
+- **Hands-free Enter:** double-tap the button to send, or to press Tab when nothing is waiting.
 - **Plug and go:** no drivers. It reconnects by itself and starts at login.
 
 ## How it works
@@ -66,7 +66,7 @@ no soldering:
 |---|---|
 | **Hold** the button and talk | types each phrase as you pause |
 | **Let go** | finishes and types the last phrase |
-| **Double-tap** | presses Enter |
+| **Double-tap** | presses Enter to send what eve typed, or Tab if nothing is waiting (accepts Claude Code's suggestion) |
 | Single quick tap | nothing, so bumps don't send anything |
 
 The button light shows what's happening:
@@ -77,7 +77,7 @@ The button light shows what's happening:
 | **red** | listening |
 | **amber** | finishing the last phrase |
 | green flash | typed |
-| blue flash | Enter |
+| blue flash | Enter or Tab |
 | red flash | something went wrong (see the log) |
 
 ## Setup

@@ -226,8 +226,8 @@ def type_text(text: str) -> None:
     subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "4", "--", text], check=True)
 
 
-def press_enter() -> None:
-    subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True)
+def press_key(key: str) -> None:
+    subprocess.run(["xdotool", "key", "--clearmodifiers", key], check=True)
 
 
 # ------------------------------------------------------------------------ main
@@ -246,6 +246,7 @@ class App:
         self.splitter = None if args.no_live else PhraseSplitter(args.pause)
         self.jobs: queue.Queue[Job] = queue.Queue()
         self._carry: Job | None = None
+        self.unsent = False   # eve has typed text that no Enter has sent yet
         self.port: serial.Serial | None = None
         self.port_lock = threading.Lock()
 
@@ -266,14 +267,18 @@ class App:
             job = self._next_job()
             if job.kind == "enter":
                 # Queued behind any text still being typed, so it lands after it.
-                log.info("double tap -> Enter")
+                # Text eve typed and hasn't sent yet -> Enter sends it.
+                # Nothing waiting -> Tab (accepts Claude Code's suggested prompt).
+                key = "Return" if self.unsent else "Tab"
+                log.info("double tap -> %s", "Enter" if self.unsent else "Tab")
                 if self.args.dry_run:
-                    print("[Enter]", flush=True)
+                    print(f"[{key}]", flush=True)
                 else:
                     try:
-                        press_enter()
+                        press_key(key)
                     except Exception:
-                        log.exception("Enter failed")
+                        log.exception("%s failed", key)
+                self.unsent = False
                 continue
             if job.dictation != current:
                 current, context, typed_any = job.dictation, "", False
@@ -287,11 +292,13 @@ class App:
                         type_text(text)
                     context += text
                     typed_any = True
+                    self.unsent = True
                 if job.final:
                     if self.args.dry_run and not text:
                         print(flush=True)
                     if self.args.enter and typed_any and not self.args.dry_run:
-                        press_enter()
+                        press_key("Return")
+                        self.unsent = False
                     self.tell_device(b"K" if typed_any else b"I")
             except Exception:
                 log.exception("transcription failed")
