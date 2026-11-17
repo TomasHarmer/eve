@@ -17,7 +17,7 @@
 
 **eve** is a tiny USB-C voice stick. You hold its button and talk, and your
 words appear in the window that has your cursor: a terminal, an editor, a chat
-box. A **double-tap** presses Enter, or Tab when there's nothing to send.
+box. A **tap** sends it with Enter, and a **double-tap** deletes it.
 
 It was built for driving AI coding sessions (Claude Code and friends) while
 walking around with the laptop open, so you don't have to stop and type. It
@@ -26,7 +26,7 @@ works in any app.
 - **Live:** each phrase is typed as soon as you pause. You don't have to let go first.
 - **Private:** speech recognition runs on your own computer with
   [faster-whisper](https://github.com/SYSTRAN/faster-whisper). No audio leaves the machine.
-- **Hands-free Enter:** double-tap the button to send, or to press Tab when nothing is waiting.
+- **Hands-free send and undo:** tap to press Enter (or Tab to accept a suggestion), double-tap to delete.
 - **Plug and go:** no drivers. It reconnects by itself and starts at login.
 
 ## How it works
@@ -36,7 +36,7 @@ works in any app.
  │  mic  ──▶  ESP32-S3  ◀──  button  │  USB-C   │  voicetype.py                          │
  │            streams 16 kHz audio   │ ───────▶ │   ├─ splits speech at pauses (VAD)     │
  │            while the button is    │          │   ├─ transcribes each phrase (Whisper) │
- │            held; double-tap = ⏎   │ ◀─────── │   └─ types it at your cursor (xdotool) │
+ │            held; tap = ⏎ / ⇥      │ ◀─────── │   └─ types it at your cursor (xdotool) │
  └───────────────────────────────────┘  light   └────────────────────────────────────────┘
 ```
 
@@ -66,8 +66,13 @@ no soldering:
 |---|---|
 | **Hold** the button and talk | types each phrase as you pause |
 | **Let go** | finishes and types the last phrase |
-| **Double-tap** | presses Enter to send what eve typed, or Tab if nothing is waiting (accepts Claude Code's suggestion) |
-| Single quick tap | nothing, so bumps don't send anything |
+| **Tap** | presses **Enter** to send what eve typed. With nothing waiting, presses **Tab** to accept Claude Code's suggestion |
+| **Double-tap** | deletes the text eve typed that hasn't been sent yet |
+
+A tap waits about a third of a second to make sure it isn't a double-tap.
+eve only tracks text it typed itself: if you type or edit by hand in between,
+a tap still sees "nothing waiting", and a double-tap deletes only as many
+characters as eve typed.
 
 The button light shows what's happening:
 
@@ -77,7 +82,8 @@ The button light shows what's happening:
 | **red** | listening |
 | **amber** | finishing the last phrase |
 | green flash | typed |
-| blue flash | Enter or Tab |
+| blue flash | tap (Enter or Tab) |
+| violet flash | double-tap (delete) |
 | red flash | something went wrong (see the log) |
 
 ## Setup

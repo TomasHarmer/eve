@@ -9,7 +9,7 @@ Transcription runs locally with faster-whisper.
     host/.venv/bin/python host/voicetype.py                   # default: base.en, live
     host/.venv/bin/python host/voicetype.py --model small.en  # more accurate, ~3x slower
     host/.venv/bin/python host/voicetype.py --enter           # press Enter on release
-                                                              # (or double-tap the button any time)
+                                                              # (or tap the button: Enter / Tab)
     host/.venv/bin/python host/voicetype.py --no-live         # type everything on release
 
 See ../firmware/src/main.cpp for the wire protocol.
@@ -39,7 +39,7 @@ BYTES_PER_SEC = SAMPLE_RATE * 2
 MAGIC = b"\xa5\x5a"
 ESPRESSIF_VID = 0x303A
 MAX_PAYLOAD = 4096
-PACKET_TYPES = b"SDEAN"
+PACKET_TYPES = b"SDEANT"
 STALL_SECONDS = 3.0  # a recording with no packets this long is finalized anyway
 
 DEFAULT_PROMPT = (
@@ -226,8 +226,9 @@ def type_text(text: str) -> None:
     subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "4", "--", text], check=True)
 
 
-def press_key(key: str) -> None:
-    subprocess.run(["xdotool", "key", "--clearmodifiers", key], check=True)
+def press_key(key: str, repeat: int = 1) -> None:
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "--repeat", str(repeat), "--repeat-delay", "2", key],
+                   check=True)
 
 
 # ------------------------------------------------------------------------ main
@@ -236,7 +237,7 @@ class Job:
     dictation: int   # which button-hold this audio belongs to
     pcm: bytes
     final: bool      # last piece of the dictation (button released)
-    kind: str = "audio"   # or "enter": a double tap, press Enter in order
+    kind: str = "audio"   # or "tap" / "double": button gestures, handled in order
 
 
 class App:
@@ -246,7 +247,7 @@ class App:
         self.splitter = None if args.no_live else PhraseSplitter(args.pause)
         self.jobs: queue.Queue[Job] = queue.Queue()
         self._carry: Job | None = None
-        self.unsent = False   # eve has typed text that no Enter has sent yet
+        self.unsent = 0   # characters eve has typed that no Enter has sent yet
         self.port: serial.Serial | None = None
         self.port_lock = threading.Lock()
 
@@ -265,20 +266,9 @@ class App:
         typed_any = False
         while True:
             job = self._next_job()
-            if job.kind == "enter":
-                # Queued behind any text still being typed, so it lands after it.
-                # Text eve typed and hasn't sent yet -> Enter sends it.
-                # Nothing waiting -> Tab (accepts Claude Code's suggested prompt).
-                key = "Return" if self.unsent else "Tab"
-                log.info("double tap -> %s", "Enter" if self.unsent else "Tab")
-                if self.args.dry_run:
-                    print(f"[{key}]", flush=True)
-                else:
-                    try:
-                        press_key(key)
-                    except Exception:
-                        log.exception("%s failed", key)
-                self.unsent = False
+            if job.kind in ("tap", "double"):
+                # Queued behind any text still being typed, so it acts after it.
+                self.gesture(job.kind)
                 continue
             if job.dictation != current:
                 current, context, typed_any = job.dictation, "", False
@@ -292,17 +282,42 @@ class App:
                         type_text(text)
                     context += text
                     typed_any = True
-                    self.unsent = True
+                    self.unsent += len(text)
                 if job.final:
                     if self.args.dry_run and not text:
                         print(flush=True)
                     if self.args.enter and typed_any and not self.args.dry_run:
                         press_key("Return")
-                        self.unsent = False
+                        self.unsent = 0
                     self.tell_device(b"K" if typed_any else b"I")
             except Exception:
                 log.exception("transcription failed")
                 self.tell_device(b"X")
+
+    def gesture(self, kind: str) -> None:
+        """Single tap: Enter if eve has typed unsent text, else Tab (accepts
+        Claude Code's suggestion). Double tap: delete eve's unsent text."""
+        try:
+            if kind == "tap":
+                key = "Return" if self.unsent else "Tab"
+                log.info("tap -> %s", "Enter" if self.unsent else "Tab")
+                if self.args.dry_run:
+                    print(f"[{key}]", flush=True)
+                else:
+                    press_key(key)
+                self.unsent = 0
+            elif self.unsent:
+                log.info("double tap -> delete %d characters", self.unsent)
+                if self.args.dry_run:
+                    print(f"[delete {self.unsent}]", flush=True)
+                else:
+                    press_key("BackSpace", repeat=self.unsent)
+                self.unsent = 0
+            else:
+                log.info("double tap -> nothing to delete")
+        except Exception:
+            log.exception("%s failed", kind)
+            self.tell_device(b"X")
 
     def _next_job(self) -> Job:
         """Next job, merged with any phrases of the same dictation already waiting.
@@ -410,8 +425,10 @@ class App:
                         rec = None   # it was only a tap; nothing to transcribe
                         if self.splitter:
                             self.splitter.reset()
+                    elif ptype == "T":
+                        self.jobs.put(Job(-1, b"", True, kind="tap"))
                     elif ptype == "N":
-                        self.jobs.put(Job(-1, b"", True, kind="enter"))
+                        self.jobs.put(Job(-1, b"", True, kind="double"))
                     elif ptype == "E" and rec is not None:
                         dropped = struct.unpack("<I", payload)[0] if len(payload) == 4 else 0
                         if dropped:

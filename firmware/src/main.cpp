@@ -16,7 +16,8 @@
  *     'D'  audio, int16 LE mono 16 kHz  (len <= 1024, always even)
  *     'E'  recording ended              (len 4: uint32 dropped-sample count)
  *     'A'  recording aborted — it was only a tap; discard it (len 0)
- *     'N'  double tap: press Enter      (len 0)
+ *     'T'  single tap                   (len 0)  host: Enter if text waiting, else Tab
+ *     'N'  double tap                   (len 0)  host: delete the waiting text
  *   Driver log lines ("[Button] Pressed" etc.) may appear *between* packets;
  *   the host skips anything that isn't a packet.
  *
@@ -51,7 +52,8 @@ static const uint32_t TAIL_MS        = 300;     // keep recording after release 
 static const uint32_t MAX_RECORD_MS  = 120000;  // hard cap on one dictation
 static const uint32_t HOST_WAIT_MS   = 4000;    // amber light gives up if the host never answers
 static const uint32_t TAP_MS         = 250;     // a press shorter than this is a tap, not dictation
-static const uint32_t DOUBLE_TAP_MS  = 400;     // max gap from releasing tap 1 to pressing tap 2
+static const uint32_t DOUBLE_TAP_MS  = 350;     // max gap from releasing tap 1 to pressing tap 2
+                                                // (also how long a single tap waits before acting)
 static const size_t   STREAM_BYTES   = 16384;   // ~0.5 s of audio buffered between mic task and USB
 static const size_t   PACKET_BYTES   = 1024;    // audio bytes per 'D' packet
 
@@ -204,10 +206,20 @@ static void registerTap(uint32_t pressedAt) {
     if (haveTap && pressedAt - tapReleased <= DOUBLE_TAP_MS) {
         haveTap = false;
         sendPacket('N', nullptr, 0);
-        flash(0, 120, 255);            // blue: Enter
+        flash(200, 0, 255);            // violet: double tap (clear)
     } else {
-        haveTap     = true;
+        haveTap     = true;            // wait to see if a second tap follows
         tapReleased = millis();
+    }
+}
+
+// A lone tap is only known to be single once the double-tap window has passed
+// without another press.
+static void serviceTaps() {
+    if (haveTap && !button.isPressed() && millis() - tapReleased > DOUBLE_TAP_MS) {
+        haveTap = false;
+        sendPacket('T', nullptr, 0);
+        flash(0, 120, 255);            // blue: single tap (Enter / Tab)
     }
 }
 
@@ -246,8 +258,11 @@ void mainTask(void* /*parameter*/) {
             } else {
                 tailing    = true;
                 releasedAt = millis();
+                haveTap    = false;            // tap-then-hold is dictation, not a tap
             }
         }
+
+        serviceTaps();
 
         if (recording) {
             drainAudio();
