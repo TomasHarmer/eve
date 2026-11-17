@@ -248,6 +248,7 @@ class App:
         self.jobs: queue.Queue[Job] = queue.Queue()
         self._carry: Job | None = None
         self.unsent = 0   # characters eve has typed that no Enter has sent yet
+        self.tabbed = False  # eve pressed Tab (accepted a suggestion) that no Enter has sent yet
         self.port: serial.Serial | None = None
         self.port_lock = threading.Lock()
 
@@ -289,6 +290,7 @@ class App:
                     if self.args.enter and typed_any and not self.args.dry_run:
                         press_key("Return")
                         self.unsent = 0
+                        self.tabbed = False
                     self.tell_device(b"K" if typed_any else b"I")
             except Exception:
                 log.exception("transcription failed")
@@ -299,13 +301,17 @@ class App:
         Claude Code's suggestion). Double tap: delete eve's unsent text."""
         try:
             if kind == "tap":
-                key = "Return" if self.unsent else "Tab"
-                log.info("tap -> %s", "Enter" if self.unsent else "Tab")
+                # A Tab fills in Claude Code's suggestion, so after one there is
+                # text waiting too: the next tap sends it.
+                send = bool(self.unsent) or self.tabbed
+                key = "Return" if send else "Tab"
+                log.info("tap -> %s", "Enter" if send else "Tab")
                 if self.args.dry_run:
                     print(f"[{key}]", flush=True)
                 else:
                     press_key(key)
                 self.unsent = 0
+                self.tabbed = not send
             elif self.unsent:
                 log.info("double tap -> delete %d characters", self.unsent)
                 if self.args.dry_run:
