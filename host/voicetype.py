@@ -105,21 +105,19 @@ def probe(device: str) -> bool:
 def find_port(not_eve: set) -> str | None:
     """Find eve among the connected ESP32 boards.
 
-    A board already known to be eve is used straight away. Otherwise each
-    unknown board is asked once whether it is eve (and remembered if so);
-    boards that say no are left alone until they are replugged, so they
-    stay free for atech.dev, PlatformIO and so on."""
+    Once any eve is known (~/.config/eve/device), only known eve boards are
+    ever opened; to add another eve board, put its USB serial number on a new
+    line in that file. Until then each board is asked once whether it is eve;
+    boards that say no are left alone for the rest of the session."""
     ports = [p for p in list_ports.comports() if p.vid == ESPRESSIF_VID]
-    # A board that was unplugged gets asked again when it comes back (it may
-    # have been in its bootloader, or just been flashed with eve).
-    not_eve &= {p.serial_number or p.device for p in ports}
     known = known_serials()
-    for p in ports:
-        if p.serial_number in known:
-            return p.device
+    if known:
+        # Never open any other board: a flasher (atech.dev, PlatformIO)
+        # resets boards mid-flash, and opening the port then breaks it.
+        return next((p.device for p in ports if p.serial_number in known), None)
     for p in ports:
         key = p.serial_number or p.device
-        if key in not_eve or key in known:
+        if key in not_eve:
             continue
         if probe(p.device):
             if p.serial_number:
