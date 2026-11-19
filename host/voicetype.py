@@ -53,20 +53,20 @@ log = logging.getLogger("voicetype")
 
 
 # ---------------------------------------------------------------- serial link
-DEVICE_FILE = os.path.expanduser("~/.config/eve/device")   # eve's USB serial number
+DEVICE_FILE = os.path.expanduser("~/.config/eve/device")   # eve USB serial numbers, one per line
 
 
-def known_serial() -> str | None:
+def known_serials() -> set[str]:
     try:
         with open(DEVICE_FILE) as f:
-            return f.read().strip() or None
+            return {line.strip() for line in f if line.strip()}
     except OSError:
-        return None
+        return set()
 
 
 def remember_serial(sn: str) -> None:
     os.makedirs(os.path.dirname(DEVICE_FILE), exist_ok=True)
-    with open(DEVICE_FILE, "w") as f:
+    with open(DEVICE_FILE, "a") as f:
         f.write(sn + "\n")
 
 
@@ -105,17 +105,21 @@ def probe(device: str) -> bool:
 def find_port(not_eve: set) -> str | None:
     """Find eve among the connected ESP32 boards.
 
-    Once eve's serial number is known, only that device is ever opened, so
-    other Atech boards stay free for atech.dev, PlatformIO and so on. Until
-    then each unknown board is asked once whether it is eve; boards that
-    say no are left alone for the rest of the session."""
+    A board already known to be eve is used straight away. Otherwise each
+    unknown board is asked once whether it is eve (and remembered if so);
+    boards that say no are left alone until they are replugged, so they
+    stay free for atech.dev, PlatformIO and so on."""
     ports = [p for p in list_ports.comports() if p.vid == ESPRESSIF_VID]
-    known = known_serial()
-    if known:
-        return next((p.device for p in ports if p.serial_number == known), None)
+    # A board that was unplugged gets asked again when it comes back (it may
+    # have been in its bootloader, or just been flashed with eve).
+    not_eve &= {p.serial_number or p.device for p in ports}
+    known = known_serials()
+    for p in ports:
+        if p.serial_number in known:
+            return p.device
     for p in ports:
         key = p.serial_number or p.device
-        if key in not_eve:
+        if key in not_eve or key in known:
             continue
         if probe(p.device):
             if p.serial_number:
