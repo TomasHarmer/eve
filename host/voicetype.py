@@ -46,7 +46,8 @@ CLEAR_LINES = 6  # Ctrl+U presses when clearing a prompt; each clears one line
 
 DEFAULT_PROMPT = (
     "Dictation for a coding assistant in a terminal. Claude, Claude Code, git, "
-    "GitHub, Python, TypeScript, JSON, API, CLI, README, npm, pip, ESP32, Atech."
+    "GitHub, Python, TypeScript, JSON, API, CLI, README, npm, pip, ESP32, Atech, "
+    "PCB, LED, USB-C, GPIO, I2C, firmware, antenna, module, KiCad, FreeCAD, power."
 )
 
 log = logging.getLogger("voicetype")
