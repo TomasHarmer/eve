@@ -69,6 +69,10 @@ no soldering:
 | **Tap** | presses **Enter** to send what eve typed. With nothing waiting, presses **Tab** to accept Claude Code's suggestion, and the next tap sends it |
 | **Double-tap** | deletes the text eve typed that hasn't been sent yet. After a Tab, clears the whole prompt, suggestion included |
 
+eve types into the window that had focus when you pressed the button, so you
+can click away while it's still transcribing. It briefly switches back to type
+(and to press Enter or delete for a tap), then returns you to where you were.
+
 A tap waits about a third of a second to make sure it isn't a double-tap.
 eve only tracks text it typed itself: if you type or edit by hand in between,
 a tap still sees "nothing waiting", and a double-tap deletes only as many

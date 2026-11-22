@@ -421,6 +421,45 @@ def press_key(key: str, repeat: int = 1) -> None:
                    check=True)
 
 
+def active_window() -> str | None:
+    try:
+        r = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=2)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+class WindowGone(Exception):
+    pass
+
+
+class in_window:
+    """Run the typing inside `with in_window(w):` to send it to window w even
+    if focus has moved on since: switch to w, type, then switch back."""
+
+    def __init__(self, window: str | None):
+        self.window, self.back = window, None
+
+    def __enter__(self):
+        if not self.window:
+            return self
+        cur = active_window()
+        if cur == self.window:
+            return self
+        r = subprocess.run(["xdotool", "windowactivate", "--sync", self.window],
+                           capture_output=True, timeout=3)
+        if r.returncode != 0 or active_window() != self.window:
+            raise WindowGone(self.window)
+        self.back = cur
+        time.sleep(0.05)   # let the window settle its keyboard focus
+        return self
+
+    def __exit__(self, *exc):
+        if self.back:
+            subprocess.run(["xdotool", "windowactivate", self.back], capture_output=True, timeout=3)
+        return False
+
+
 # ------------------------------------------------------------------------ main
 @dataclass
 class Job:
@@ -428,6 +467,7 @@ class Job:
     pcm: bytes
     final: bool      # last piece of the dictation (button released)
     kind: str = "audio"   # or "tap" / "double": button gestures, handled in order
+    window: str | None = None  # X window that had focus when the button was pressed
 
 
 class App:
@@ -445,6 +485,7 @@ class App:
         self._carry: Job | None = None
         self.unsent = 0   # characters eve has typed that no Enter has sent yet
         self.tabbed = False  # eve pressed Tab (accepted a suggestion) that no Enter has sent yet
+        self.text_window: str | None = None  # where that unsent text / Tab went
         self.port: serial.Serial | None = None
         self.port_lock = threading.Lock()
 
@@ -465,7 +506,7 @@ class App:
             job = self._next_job()
             if job.kind in ("tap", "double"):
                 # Queued behind any text still being typed, so it acts after it.
-                self.gesture(job.kind)
+                self.gesture(job.kind, job.window)
                 continue
             if job.dictation != current:
                 current, context, typed_any = job.dictation, "", False
@@ -476,7 +517,11 @@ class App:
                     if self.args.dry_run:
                         print(text, end="" if not job.final else "\n", flush=True)
                     else:
-                        type_text(text)
+                        if self.unsent and self.text_window != job.window:
+                            self.unsent = 0   # earlier unsent text was in another window
+                        with in_window(job.window):
+                            type_text(text)
+                        self.text_window = job.window
                     context += text
                     typed_any = True
                     self.unsent += len(text)
@@ -484,58 +529,78 @@ class App:
                     if self.args.dry_run and not text:
                         print(flush=True)
                     if self.args.enter and typed_any and not self.args.dry_run:
-                        press_key("Return")
+                        with in_window(job.window):
+                            press_key("Return")
                         self.unsent = 0
                         self.tabbed = False
                     self.tell_device(b"K" if typed_any else b"I")
+            except WindowGone:
+                log.warning("the window you were dictating into is gone; dropped the text")
+                self.tell_device(b"X")
             except Exception:
                 log.exception("transcription failed")
                 self.tell_device(b"X")
 
-    def gesture(self, kind: str) -> None:
+    def gesture(self, kind: str, tap_window: str | None = None) -> None:
         """Single tap: Enter if eve has typed unsent text, else Tab (accepts
         Claude Code's suggestion). Double tap: delete eve's unsent text, or
-        clear the whole prompt if a Tab put a suggestion there."""
+        clear the whole prompt if a Tab put a suggestion there.
+
+        Enter and delete go to the window holding eve's unsent text, even if
+        you've clicked somewhere else since; a fresh Tab goes to the window
+        that had focus when you tapped."""
+        waiting = bool(self.unsent) or self.tabbed
+        window = self.text_window if waiting else tap_window
         try:
-            if kind == "tap":
-                # A Tab fills in Claude Code's suggestion, so after one there is
-                # text waiting too: the next tap sends it.
-                send = bool(self.unsent) or self.tabbed
-                key = "Return" if send else "Tab"
-                log.info("tap -> %s", "Enter" if send else "Tab")
-                if self.args.dry_run:
-                    print(f"[{key}]", flush=True)
-                else:
-                    press_key(key)
-                self.unsent = 0
-                self.tabbed = not send
-            elif self.tabbed:
-                # eve can't know how long the accepted suggestion is, so clear
-                # the whole prompt the documented Claude Code way: Ctrl+E to the
-                # line end, then Ctrl+U (delete to line start) repeated, which
-                # also clears multi-line input. Not Esc Esc: on an empty prompt
-                # that opens the rewind menu.
-                log.info("double tap -> clear the prompt (suggestion%s)",
-                         f" + {self.unsent} dictated characters" if self.unsent else "")
-                if self.args.dry_run:
-                    print("[clear prompt]", flush=True)
-                else:
-                    press_key("ctrl+e")
-                    press_key("ctrl+u", repeat=CLEAR_LINES)
-                self.unsent = 0
-                self.tabbed = False
-            elif self.unsent:
-                log.info("double tap -> delete %d characters", self.unsent)
-                if self.args.dry_run:
-                    print(f"[delete {self.unsent}]", flush=True)
-                else:
-                    press_key("BackSpace", repeat=self.unsent)
-                self.unsent = 0
-            else:
-                log.info("double tap -> nothing to delete")
+            with in_window(None if self.args.dry_run else window):
+                self._gesture(kind)
+            if kind == "tap" and self.tabbed:
+                self.text_window = window
+        except WindowGone:
+            log.warning("the window eve typed into is gone; ignoring the %s", kind)
+            self.unsent, self.tabbed = 0, False
+            self.tell_device(b"X")
         except Exception:
             log.exception("%s failed", kind)
             self.tell_device(b"X")
+
+    def _gesture(self, kind: str) -> None:
+        if kind == "tap":
+            # A Tab fills in Claude Code's suggestion, so after one there is
+            # text waiting too: the next tap sends it.
+            send = bool(self.unsent) or self.tabbed
+            key = "Return" if send else "Tab"
+            log.info("tap -> %s", "Enter" if send else "Tab")
+            if self.args.dry_run:
+                print(f"[{key}]", flush=True)
+            else:
+                press_key(key)
+            self.unsent = 0
+            self.tabbed = not send
+        elif self.tabbed:
+            # eve can't know how long the accepted suggestion is, so clear
+            # the whole prompt the documented Claude Code way: Ctrl+E to the
+            # line end, then Ctrl+U (delete to line start) repeated, which
+            # also clears multi-line input. Not Esc Esc: on an empty prompt
+            # that opens the rewind menu.
+            log.info("double tap -> clear the prompt (suggestion%s)",
+                     f" + {self.unsent} dictated characters" if self.unsent else "")
+            if self.args.dry_run:
+                print("[clear prompt]", flush=True)
+            else:
+                press_key("ctrl+e")
+                press_key("ctrl+u", repeat=CLEAR_LINES)
+            self.unsent = 0
+            self.tabbed = False
+        elif self.unsent:
+            log.info("double tap -> delete %d characters", self.unsent)
+            if self.args.dry_run:
+                print(f"[delete {self.unsent}]", flush=True)
+            else:
+                press_key("BackSpace", repeat=self.unsent)
+            self.unsent = 0
+        else:
+            log.info("double tap -> nothing to delete")
 
     def _next_job(self) -> Job:
         """Next job, merged with any phrases of the same dictation already waiting.
@@ -552,7 +617,7 @@ class App:
             if nxt.kind != "audio" or nxt.dictation != job.dictation:
                 self._carry = nxt
                 break
-            job = Job(job.dictation, job.pcm + nxt.pcm, nxt.final)
+            job = Job(job.dictation, job.pcm + nxt.pcm, nxt.final, window=job.window)
         return job
 
     def transcribe(self, job: Job, context: str) -> str:
@@ -607,12 +672,13 @@ class App:
         buf = bytearray()
         rec: bytearray | None = None   # whole recording, used by --no-live
         dictation = 0
+        window = None      # focused window when the current dictation started
         last_packet = time.time()
 
         def finish():
             nonlocal rec
             pcm = self.splitter.flush() if self.splitter else bytes(rec)
-            self.jobs.put(Job(dictation, pcm, final=True))
+            self.jobs.put(Job(dictation, pcm, final=True, window=window))
             rec = None
 
         while True:
@@ -626,6 +692,7 @@ class App:
                             log.warning("new recording before the last one ended; finishing it")
                             finish()
                         dictation += 1
+                        window = active_window()
                         rec = bytearray()
                         if self.splitter:
                             self.splitter.reset()
@@ -634,7 +701,7 @@ class App:
                         if self.splitter:
                             phrase = self.splitter.feed(payload)
                             if phrase:
-                                self.jobs.put(Job(dictation, phrase, final=False))
+                                self.jobs.put(Job(dictation, phrase, final=False, window=window))
                         else:
                             rec += payload
                             if len(rec) > self.args.max_seconds * BYTES_PER_SEC:
@@ -645,9 +712,9 @@ class App:
                         if self.splitter:
                             self.splitter.reset()
                     elif ptype == "T":
-                        self.jobs.put(Job(-1, b"", True, kind="tap"))
+                        self.jobs.put(Job(-1, b"", True, kind="tap", window=active_window()))
                     elif ptype == "N":
-                        self.jobs.put(Job(-1, b"", True, kind="double"))
+                        self.jobs.put(Job(-1, b"", True, kind="double", window=active_window()))
                     elif ptype == "E" and rec is not None:
                         dropped = struct.unpack("<I", payload)[0] if len(payload) == 4 else 0
                         if dropped:
