@@ -2,9 +2,10 @@
 """
 voicetype — push-to-talk dictation from the Atech Tiny voice stick.
 
-Hold the stick's button and talk. Each phrase is typed wherever your cursor is
-as soon as you pause (X11, via xdotool) — you don't have to let go first.
-Transcription runs locally with faster-whisper.
+Hold the stick's button and talk. Each phrase is typed into the window you
+started in as soon as you pause (X11, via xdotool); you don't have to let go
+first. Transcription runs locally with faster-whisper, with an optional cloud
+fallback (~/.config/eve/cloud.env) for when the computer is busy.
 
     host/.venv/bin/python host/voicetype.py                   # default: base.en, live
     host/.venv/bin/python host/voicetype.py --model small.en  # more accurate, ~3x slower
@@ -142,8 +143,11 @@ def open_port(device: str) -> serial.Serial:
     # pass through that state and reboot eve. So open with both high, then
     # drop RTS before DTR.
     s.open()
-    s.rts = False
-    s.dtr = False
+    try:
+        s.rts = False
+        s.dtr = False
+    except OSError:
+        pass   # not a USB serial port (e.g. a virtual one): no control lines
     return s
 
 
@@ -739,15 +743,15 @@ def main() -> None:
                     help="faster-whisper model: tiny.en, base.en (default), small.en (more accurate, ~3x slower), medium.en")
     ap.add_argument("--port", help="serial device (default: find eve among the connected boards)")
     ap.add_argument("--forget-device", action="store_true",
-                    help="forget which board is eve (after swapping its Tiny board) and search again")
+                    help="forget which boards are eve (~/.config/eve/device) and search again")
     ap.add_argument("--enter", action="store_true", help="press Enter when you release the button (sends it to Claude)")
     ap.add_argument("--no-live", action="store_true", help="type everything at once on release instead of phrase by phrase")
     ap.add_argument("--pause", type=float, default=0.4,
-                    help="seconds of silence that end a phrase in live mode (default 0.6)")
+                    help="seconds of silence that end a phrase in live mode (default 0.4)")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="vocabulary hint for whisper")
     ap.add_argument("--no-prompt", action="store_true", help="disable the vocabulary hint")
-    ap.add_argument("--cloud-after", type=float, default=2.0,
-                    help="seconds to wait for local transcription before asking the cloud (default 2)")
+    ap.add_argument("--cloud-after", type=float, default=1.0,
+                    help="seconds to wait for local transcription before asking the cloud (default 1)")
     ap.add_argument("--no-cloud", action="store_true", help="never use the cloud, even if cloud.env is set up")
     ap.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--max-seconds", type=int, default=120, help="cap for one dictation in --no-live mode")
