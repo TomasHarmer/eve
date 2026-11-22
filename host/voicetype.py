@@ -214,6 +214,113 @@ class LocalWhisper:
         return " ".join(s.text.strip() for s in segments).strip()
 
 
+# Cloud speech services with an OpenAI-style /audio/transcriptions endpoint.
+CLOUD_PROVIDERS = {
+    "groq":   ("https://api.groq.com/openai/v1/audio/transcriptions", "whisper-large-v3-turbo", "GROQ_API_KEY"),
+    "openai": ("https://api.openai.com/v1/audio/transcriptions", "gpt-4o-mini-transcribe", "OPENAI_API_KEY"),
+}
+CLOUD_FILE = os.path.expanduser("~/.config/eve/cloud.env")
+
+
+def load_cloud_config() -> tuple[str, str] | None:
+    """(provider, api_key) from ~/.config/eve/cloud.env, else None (cloud off).
+
+    The file holds two lines:  provider=groq   and   key=<your API key>"""
+    conf = {}
+    try:
+        with open(CLOUD_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    conf[k.strip().lower()] = v.strip().strip("'\"")
+    except OSError:
+        return None
+    provider = conf.get("provider", "groq").lower()
+    if provider not in CLOUD_PROVIDERS:
+        log.warning("cloud.env: unknown provider %r (use groq or openai)", provider)
+        return None
+    key = conf.get("key") or os.environ.get(CLOUD_PROVIDERS[provider][2], "")
+    return (provider, key) if key else None
+
+
+class CloudWhisper:
+    def __init__(self, provider: str, key: str, prompt: str | None):
+        self.url, self.model, _ = CLOUD_PROVIDERS[provider]
+        self.provider, self.key, self.prompt = provider, key, prompt
+
+    def transcribe(self, audio: np.ndarray, context: str = "") -> str:
+        import io
+        import json
+        import urllib.request
+        import uuid
+
+        wav = io.BytesIO()
+        with wave.open(wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        prompt = " ".join(p for p in (self.prompt, context[-200:]) if p)
+        fields = {"model": self.model, "language": "en", "response_format": "json"}
+        if prompt:
+            fields["prompt"] = prompt
+        b = uuid.uuid4().hex
+        body = bytearray()
+        for k, v in fields.items():
+            body += f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+        body += (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="eve.wav"\r\n'
+                 "Content-Type: audio/wav\r\n\r\n").encode()
+        body += wav.getvalue() + f"\r\n--{b}--\r\n".encode()
+        req = urllib.request.Request(self.url, data=bytes(body), method="POST", headers={
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": f"multipart/form-data; boundary={b}",
+            "User-Agent": "eve-voicetype",
+        })
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.load(r).get("text", "").strip()
+
+
+class Hybrid:
+    """Local first. If the local model hasn't answered within `wait` seconds,
+    or is still busy with an earlier phrase, ask the cloud and use whichever
+    answer arrives first. Falls back to local if the cloud fails."""
+
+    def __init__(self, local: LocalWhisper, cloud: CloudWhisper | None, wait: float):
+        self.local, self.cloud, self.wait = local, cloud, wait
+        self.local_free = threading.Lock()
+
+    def transcribe(self, audio: np.ndarray, context: str = "") -> tuple[str, str]:
+        if self.cloud is None:
+            with self.local_free:
+                return self.local.transcribe(audio, context), "local"
+        result: dict = {}
+        done = threading.Event()
+        started = self.local_free.acquire(blocking=False)
+        if started:
+            def run():
+                try:
+                    result["text"] = self.local.transcribe(audio, context)
+                except Exception as e:
+                    log.warning("local transcription failed (%s)", e)
+                finally:
+                    self.local_free.release()
+                    done.set()
+            threading.Thread(target=run, daemon=True).start()
+            if done.wait(self.wait):
+                return result.get("text", ""), "local"
+        try:
+            text = self.cloud.transcribe(audio, context)
+            return text, f"{self.cloud.provider}, local {'slow' if started else 'busy'}"
+        except Exception as e:
+            log.warning("cloud transcription failed (%s); using local", e)
+        if started:
+            done.wait()
+            return result.get("text", ""), "local"
+        with self.local_free:
+            return self.local.transcribe(audio, context), "local"
+
+
 def prepare_audio(pcm: bytes) -> np.ndarray:
     a = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
     if a.size == 0:
@@ -326,7 +433,13 @@ class Job:
 class App:
     def __init__(self, args):
         self.args = args
-        self.engine = LocalWhisper(args.model, None if args.no_prompt else args.prompt, args.threads)
+        prompt = None if args.no_prompt else args.prompt
+        local = LocalWhisper(args.model, prompt, args.threads)
+        conf = None if args.no_cloud else load_cloud_config()
+        cloud = CloudWhisper(conf[0], conf[1], prompt) if conf else None
+        if cloud:
+            log.info("cloud fallback on (%s) for phrases slower than %.1fs", cloud.provider, args.cloud_after)
+        self.engine = Hybrid(local, cloud, args.cloud_after)
         self.splitter = None if args.no_live else PhraseSplitter(args.pause)
         self.jobs: queue.Queue[Job] = queue.Queue()
         self._carry: Job | None = None
@@ -451,12 +564,12 @@ class App:
         if self.args.save_wav:
             save_wav(self.args.save_wav, job.pcm)
         t0 = time.time()
-        text = self.engine.transcribe(prepare_audio(job.pcm), context)
+        text, source = self.engine.transcribe(prepare_audio(job.pcm), context)
         dt = time.time() - t0
         if is_hallucination(text):
-            log.info("%.1fs audio -> (nothing heard) [%.1fs]", seconds, dt)
+            log.info("%.1fs audio -> (nothing heard) [%.1fs %s]", seconds, dt, source)
             return ""
-        log.info("%.1fs audio -> %r [%.1fs]%s", seconds, text, dt, "" if job.final else " (live)")
+        log.info("%.1fs audio -> %r [%.1fs %s]%s", seconds, text, dt, source, "" if job.final else " (live)")
         return text
 
     # -- serial loop with automatic reconnect
@@ -566,6 +679,9 @@ def main() -> None:
                     help="seconds of silence that end a phrase in live mode (default 0.6)")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="vocabulary hint for whisper")
     ap.add_argument("--no-prompt", action="store_true", help="disable the vocabulary hint")
+    ap.add_argument("--cloud-after", type=float, default=2.0,
+                    help="seconds to wait for local transcription before asking the cloud (default 2)")
+    ap.add_argument("--no-cloud", action="store_true", help="never use the cloud, even if cloud.env is set up")
     ap.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--max-seconds", type=int, default=120, help="cap for one dictation in --no-live mode")
     ap.add_argument("--dry-run", action="store_true", help="print text instead of typing it")

@@ -25,7 +25,7 @@ works in any app.
 
 - **Live:** each phrase is typed as soon as you pause. You don't have to let go first.
 - **Private:** speech recognition runs on your own computer with
-  [faster-whisper](https://github.com/SYSTRAN/faster-whisper). No audio leaves the machine.
+  [faster-whisper](https://github.com/SYSTRAN/faster-whisper). No audio leaves the machine, unless you turn on the optional cloud fallback.
 - **Hands-free send and undo:** tap to press Enter (or Tab to accept a suggestion), double-tap to delete.
 - **Plug and go:** no drivers. It reconnects by itself and starts at login.
 
@@ -133,6 +133,8 @@ It logs to `~/.cache/voicetype.log`.
 
 | Flag | What it does |
 |---|---|
+| `--no-cloud` | never use the cloud fallback (see below) |
+| `--cloud-after 2` | seconds to wait for local transcription before asking the cloud |
 | `--model small.en` | more accurate on technical words, about 3× slower than the default `base.en` |
 | `--pause 0.6` | how long a pause (seconds) ends a phrase. Default `0.4` |
 | `--enter` | also press Enter every time you let go |
@@ -140,6 +142,21 @@ It logs to `~/.cache/voicetype.log`.
 | `--dry-run` | print the text instead of typing it |
 | `--save-wav last.wav` | keep the last recording, for checking the mic |
 | `-v` | also show the stick's log lines |
+
+### Cloud fallback (optional)
+
+Transcription is local by default. On a busy laptop it can get slow, so eve can
+fall back to a cloud speech service when a phrase takes longer than 2 seconds.
+It uses whichever answer arrives first, and goes back to local if the cloud
+fails. Put your key in `~/.config/eve/cloud.env` (keep it `chmod 600`):
+
+```
+provider=groq        # or openai
+key=YOUR_API_KEY
+```
+
+Only the phrases that fall back are sent, and the log marks each phrase as
+`local` or `groq`. Without that file, no audio leaves the machine.
 
 ## Troubleshooting
 
