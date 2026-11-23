@@ -22,6 +22,7 @@ import argparse
 import logging
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -417,10 +418,16 @@ class PhraseSplitter:
 
 # ---------------------------------------------------------------------- typing
 def type_text(text: str) -> None:
-    subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "4", "--", text], check=True)
+    # A few words per xdotool call, checking before each that the target
+    # window still has focus: a long phrase takes a second or two to type,
+    # and you may click away in the middle of it.
+    for chunk in re.findall(r".{1,24}(?:\s+|$)|\S+", text, re.S):
+        in_window.ensure()
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "4", "--", chunk], check=True)
 
 
 def press_key(key: str, repeat: int = 1) -> None:
+    in_window.ensure()
     subprocess.run(["xdotool", "key", "--clearmodifiers", "--repeat", str(repeat), "--repeat-delay", "2", key],
                    check=True)
 
@@ -433,34 +440,70 @@ def active_window() -> str | None:
         return None
 
 
+def window_name(w: str | None) -> str:
+    try:
+        r = subprocess.run(["xdotool", "getwindowname", w], capture_output=True, text=True, timeout=2)
+        return r.stdout.strip()[:40]
+    except Exception:
+        return "?"
+
+
 class WindowGone(Exception):
     pass
 
 
 class in_window:
     """Run the typing inside `with in_window(w):` to send it to window w even
-    if focus has moved on since: switch to w, type, then switch back."""
+    if focus has moved on since: switch to w, type, then switch back to the
+    window you'd moved to. type_text and press_key re-check focus before each
+    piece, so a click elsewhere mid-phrase is undone too."""
+
+    target: str | None = None   # window the current `with` block types into
 
     def __init__(self, window: str | None):
-        self.window, self.back = window, None
+        self.window = window
+        self.back: str | None = None
+
+    @staticmethod
+    def _activate(w: str) -> bool:
+        try:
+            r = subprocess.run(["xdotool", "windowactivate", "--sync", w], capture_output=True, timeout=3)
+        except subprocess.TimeoutExpired:
+            return False
+        return r.returncode == 0 and active_window() == w
+
+    @classmethod
+    def ensure(cls) -> None:
+        w = cls.target
+        if not w:
+            return
+        cur = active_window()
+        if cur == w:
+            return
+        log.info("focus moved to %s (%s); switching back to %s (%s) to type", cur, window_name(cur), w, window_name(w))
+        if not cls._activate(w):
+            raise WindowGone(w)
+        if cls._current and cur:
+            cls._current.back = cur   # where you went; return there afterwards
+        time.sleep(0.05)   # let the window settle its keyboard focus
+
+    _current: "in_window | None" = None
 
     def __enter__(self):
-        if not self.window:
-            return self
-        cur = active_window()
-        if cur == self.window:
-            return self
-        r = subprocess.run(["xdotool", "windowactivate", "--sync", self.window],
-                           capture_output=True, timeout=3)
-        if r.returncode != 0 or active_window() != self.window:
-            raise WindowGone(self.window)
-        self.back = cur
-        time.sleep(0.05)   # let the window settle its keyboard focus
+        in_window.target, in_window._current = self.window, self
         return self
 
     def __exit__(self, *exc):
-        if self.back:
-            subprocess.run(["xdotool", "windowactivate", self.back], capture_output=True, timeout=3)
+        in_window.target, in_window._current = None, None
+        # Return only if eve still holds the focus: if you've clicked somewhere
+        # else again since, stay there. --sync so the next action sees the
+        # real focus, not one still changing.
+        if self.back and active_window() == self.window:
+            try:
+                subprocess.run(["xdotool", "windowactivate", "--sync", self.back],
+                               capture_output=True, timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
         return False
 
 

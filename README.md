@@ -161,7 +161,9 @@ without this file no audio leaves your computer.
 you pressed the button. If you click somewhere else while it's still
 transcribing, it briefly switches back to that window to type (and to press
 Enter or delete for a tap), then returns you to where you were. So you can talk,
-tap to send, and move on straight away.
+tap to send, and move on straight away, even in the middle of a long phrase.
+This works per window: tabs inside one terminal or browser window look like a
+single window, so text goes to whichever tab is showing.
 
 A tap waits about a third of a second to make sure it isn't a double-tap.
 eve only tracks text it typed itself: if you type or edit by hand in between,
