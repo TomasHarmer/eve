@@ -67,16 +67,30 @@ no soldering:
 
 ## Setup
 
-Tested on Linux with X11. Typing uses `xdotool`, which doesn't work on Wayland.
+eve runs on Linux. How it types depends on your desktop, and it detects that
+when it starts:
+
+| Desktop | Types with | Switches back to the window you started in |
+|---|---|---|
+| X11 (any window manager) | `xdotool` | yes, with `xdotool` |
+| Hyprland | `wtype` | yes, with `hyprctl` |
+| Sway | `wtype` | yes, with `swaymsg` (untested) |
+| Other wlroots Wayland compositors | `wtype` | no: types wherever the focus is |
+| GNOME or KDE on Wayland | not supported: log in to an X11 session | |
 
 ### 1. Install the desktop app
 
 ```bash
 git clone https://github.com/TomasHarmer/eve && cd eve
-sudo apt install xdotool
-python3 -m venv host/.venv
-host/.venv/bin/pip install -r host/requirements.txt
+host/install.sh
 ```
+
+The script detects your desktop and installs the typing tools it needs
+(with apt, pacman, dnf or zypper). It also adds you to the serial-port group
+if needed (`dialout` or `uucp`; log out and back in afterwards), and sets up
+the Python environment in `host/.venv`. Run `host/install.sh --dry-run` first
+to see what it would do, or `python3 host/desktop.py` to see only what it
+detected.
 
 ### 2. Flash the stick
 
@@ -109,6 +123,12 @@ To start it automatically every time you log in:
 ```bash
 host/install-autostart.sh --model small.en
 ```
+
+(or `host/install.sh --autostart --model small.en` in one go). This writes a
+launcher, `~/.config/eve/start.sh`, and an XDG autostart entry that runs it.
+GNOME, KDE and XFCE run that entry. Hyprland and Sway only do when started
+through a session manager such as `uwsm`. When none is running, the script
+prints the line to add to your compositor's config instead.
 
 It logs to `~/.cache/voicetype.log`, which shows each phrase, how long it took
 and whether it was transcribed locally or in the cloud. To stop or restart it:
@@ -214,6 +234,7 @@ plugged in.
 | `--forget-device` | forget which boards are eve and look again |
 | `--port /dev/ttyACM0` | use this port instead of finding eve automatically |
 | `--dry-run` | print the text instead of typing it |
+| `--desktop hyprland` | type the way this desktop needs instead of detecting it (`hyprland`, `sway`, `wayland`, `x11`) |
 | `--save-wav last.wav` | keep the last recording, for checking the mic |
 | `-v` | also show the stick's log lines |
 
@@ -245,6 +266,12 @@ Put those pins into `MIC_*` in `firmware/src/main.cpp`.
 also throttle on a low battery or in power-saver mode. Turn on the cloud
 fallback, or use the faster `base.en` model.
 
+**Nothing gets typed.** The first lines of the log say which desktop eve
+detected (`Hyprland: types with wtype, switches windows with hyprctl`). If it
+names the wrong one, eve was started outside your desktop session, without its
+environment (`WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`, ...). Start it
+from your compositor's config, as above, or force one with `--desktop`.
+
 **Wrong words.** Use `--model small.en` and the cloud fallback. If a word keeps
 coming out wrong (a product or project name), add it to the vocabulary hint
 with `--prompt`.
@@ -258,13 +285,35 @@ firmware/            PlatformIO project for the stick (ESP32-S3, Arduino)
 host/
   voicetype.py       desktop app: finding eve, VAD phrase splitting,
                      local + cloud Whisper, typing into the right window
+  desktop.py         per-desktop typing and window switching
+  install.sh         installs what your desktop needs, plus the venv
   install-autostart.sh
 assets/logo.svg
 ```
 
 The USB protocol is small and documented at the top of `firmware/src/main.cpp`.
-It's a good starting point for a different front end, such as a macOS or
-Wayland typer.
+It's a good starting point for a different front end, such as a macOS typer.
+
+### Adding a desktop
+
+Everything desktop-specific lives in `host/desktop.py`. A desktop is a
+**keyboard**, which sends text and keys (`Xdotool`, `Wtype`), plus a
+**window tracker**, which finds the focused window and focuses one by id
+(`XdotoolWindows`, `HyprlandWindows`, `SwayWindows`). To support another one:
+
+1. Write the parts it's missing. A `Windows` subclass implements `active()`,
+   `title(w)` and `focus(w)`, and lists the commands it uses in `tools`.
+   `focus` should return only once the focus has actually moved.
+2. Add a `Desktop(...)` line to `DESKTOPS`, with a `matches` function that
+   recognizes the session from its environment. The list is checked in order,
+   so put it before any more general entry it overlaps with (for example,
+   before plain `wayland`).
+3. If a tool's package name differs from its command, give it in
+   `Tool(..., packages={"apt": "..."})`. Tools that ship with the desktop
+   itself are `bundled=True`.
+
+`install.sh` and `voicetype.py --desktop` pick the new entry up from there.
+Check it with `python3 host/desktop.py --desktop yourname`.
 
 ## Credits
 
