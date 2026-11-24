@@ -76,7 +76,77 @@ when it starts:
 | Hyprland | `wtype` | yes, with `hyprctl` |
 | Sway | `wtype` | yes, with `swaymsg` (untested) |
 | Other wlroots Wayland compositors | `wtype` | no: types wherever the focus is |
-| GNOME or KDE on Wayland | not supported: log in to an X11 session | |
+| GNOME or KDE on Wayland | not supported yet: log in to an X11 session for now | |
+
+### Set up with a coding agent
+
+You can follow the steps below yourself, or paste this into a coding agent
+(Claude Code, Cursor, Codex, ...) running in a terminal on the computer you'll
+use eve on. It gives the agent the context it needs and has it check with you
+before anything that needs sudo or changes your system.
+
+```text
+Help me set up eve, a push-to-talk dictation stick, on this Linux computer.
+The code is at https://github.com/TomasHarmer/eve: clone it if it isn't here
+yet, and read README.md before you start.
+
+How eve works:
+- The stick (an Atech Tiny ESP32-S3 board with microphone, button and USB-C
+  modules) only records. While its button is held, it streams 16 kHz audio over
+  USB serial (/dev/ttyACM*). The wire protocol is at the top of
+  firmware/src/main.cpp.
+- host/voicetype.py is the desktop app. It finds the stick (it asks each ESP32
+  board whether it's eve and saves eve's USB serial number in
+  ~/.config/eve/device), splits speech into phrases at pauses, transcribes them
+  locally with faster-whisper, and types each one into the window that had
+  focus when the button was pressed. A tap presses Enter (or Tab), a
+  double-tap deletes what eve typed.
+- host/desktop.py decides how to type on this desktop: xdotool on X11,
+  wtype + hyprctl on Hyprland, wtype + swaymsg on Sway, wtype alone on other
+  wlroots compositors. GNOME and KDE on Wayland are not supported yet.
+- host/install.sh installs the typing tools for the detected desktop, adds the
+  user to the serial-port group (dialout or uucp), and creates host/.venv.
+- Optional cloud fallback: ~/.config/eve/cloud.env (provider=groq or openai,
+  key=...). Only phrases that local transcription is slow on are sent.
+
+Steps:
+1. Run `python3 host/desktop.py` and tell me which desktop it found. If it
+   says "not supported", stop and explain my options (for now, an X11 session).
+2. Run `host/install.sh --dry-run`, show me what it would do, then run
+   `host/install.sh` once I agree. It uses sudo; I'll type the password. If it
+   added me to a group, tell me to log out and back in before testing.
+3. Ask me whether the stick is already flashed. If not: flashing needs
+   PlatformIO and the Atech driver library (from atech.dev), with ATECH_LIB set
+   to the library's firmware/esp32 folder. Help me get those, then run
+   `cd firmware && pio run -t upload`. The button light blinks green once when
+   it's done; if not, I replug the stick. If the upload can't connect, I hold
+   the board's BOOT button while plugging it in and you try again.
+4. Test with `host/.venv/bin/python host/voicetype.py --dry-run`, which prints
+   the text instead of typing it. It runs until stopped, so start it in the
+   background and read its output. The first run downloads the speech model
+   (base.en is about 150 MB, small.en about 480 MB). Ask me to hold the button
+   and say something, and check what it heard. Then run it without --dry-run
+   and have me dictate into a text editor.
+5. Ask me whether eve should start at login. If so, run
+   `host/install-autostart.sh --model small.en`. If it prints a line to add to
+   my compositor's config, show it to me and ask before adding it.
+6. Ask me whether I want the cloud fallback. If so, tell me how to create
+   ~/.config/eve/cloud.env myself (chmod 600). Don't ask me to paste the API
+   key into this chat.
+
+Rules:
+- Ask before using sudo, before editing config files outside this repo, and
+  before flashing.
+- Only one program can use the stick's serial port at a time. Stop eve
+  (`pkill -f host/voicetype.py`) before flashing or starting another copy.
+- eve has to run inside my desktop session. If it can't find my desktop (for
+  example, because you're connected over SSH), ask me to start it from a
+  terminal on the desktop.
+- When something fails, check the Troubleshooting section of README.md and
+  the log first. The first log lines name the detected desktop; when eve
+  runs from autostart, the log is ~/.cache/voicetype.log. Don't change the
+  code to work around a setup problem without asking me.
+```
 
 ### 1. Install the desktop app
 
@@ -314,6 +384,14 @@ Everything desktop-specific lives in `host/desktop.py`. A desktop is a
 
 `install.sh` and `voicetype.py --desktop` pick the new entry up from there.
 Check it with `python3 host/desktop.py --desktop yourname`.
+
+**GNOME and KDE on Wayland** are the obvious next ones. Neither lets ordinary
+apps use the virtual-keyboard protocol wtype relies on, so they need a
+different keyboard. One option is a uinput tool such as `dotool`, which works
+on any desktop but needs access to `/dev/uinput` and must be told the
+keyboard layout. The other is the RemoteDesktop portal, which needs a one-time
+permission prompt. Switching windows would need KWin scripting on KDE and a
+Shell extension on GNOME.
 
 ## Credits
 

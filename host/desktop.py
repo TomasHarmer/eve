@@ -229,7 +229,7 @@ class Desktop:
 
     def describe(self) -> str:
         if self.unsupported:
-            return f"{self.label}: not supported ({self.unsupported})"
+            return f"{self.label}: not supported yet ({self.unsupported})"
         how = f"types with {self.keyboard.tools[0].command}"
         if self.windows.tracks:
             how += f", switches windows with {self.windows.tools[0].command}"
@@ -250,7 +250,7 @@ def _hyprland_autostart(cmd: str) -> str:
     return f"add to ~/.config/hypr/hyprland.conf:\n    exec-once = {cmd}"
 
 
-_NO_VKBD = "it has no virtual-keyboard protocol; log in to an X11 session instead"
+_NO_VKBD = "it doesn't offer the virtual-keyboard protocol wtype uses; log in to an X11 session for now"
 
 DESKTOPS: list[Desktop] = [
     Desktop("hyprland", "Hyprland", lambda e: bool(e.get("HYPRLAND_INSTANCE_SIGNATURE")),
