@@ -67,24 +67,106 @@ no soldering:
 
 ## Setup
 
-Tested on Linux with X11. Typing uses `xdotool`, which doesn't work on Wayland.
+eve runs on Linux. How it types depends on your desktop, and it detects that
+when it starts:
+
+| Desktop | Types with | Switches back to the window you started in |
+|---|---|---|
+| X11 (any window manager) | `xdotool` | yes, with `xdotool` |
+| Hyprland | `wtype` | yes, with `hyprctl` |
+| Sway | `wtype` | yes, with `swaymsg` (untested) |
+| Other wlroots Wayland compositors | `wtype` | no: types wherever the focus is |
+| GNOME or KDE on Wayland | not supported yet: log in to an X11 session for now | |
+
+### Set up with a coding agent
+
+You can follow the steps below yourself, or paste this into a coding agent
+(Claude Code, Cursor, Codex, ...) running in a terminal on the computer you'll
+use eve on. It gives the agent the context it needs and has it check with you
+before anything that needs sudo or changes your system.
+
+```text
+Help me set up eve, a push-to-talk dictation stick, on this Linux computer.
+The code is at https://github.com/TomasHarmer/eve: clone it if it isn't here
+yet, and read README.md before you start.
+
+How eve works:
+- The stick (an Atech Tiny ESP32-S3 board with microphone, button and USB-C
+  modules) only records. While its button is held, it streams 16 kHz audio over
+  USB serial (/dev/ttyACM*). The wire protocol is at the top of
+  firmware/src/main.cpp.
+- host/voicetype.py is the desktop app. It finds the stick (it asks each ESP32
+  board whether it's eve and saves eve's USB serial number in
+  ~/.config/eve/device), splits speech into phrases at pauses, transcribes them
+  locally with faster-whisper, and types each one into the window that had
+  focus when the button was pressed. A tap presses Enter (or Tab), a
+  double-tap deletes what eve typed.
+- host/desktop.py decides how to type on this desktop: xdotool on X11,
+  wtype + hyprctl on Hyprland, wtype + swaymsg on Sway, wtype alone on other
+  wlroots compositors. GNOME and KDE on Wayland are not supported yet.
+- host/install.sh installs the typing tools for the detected desktop, adds the
+  user to the serial-port group (dialout or uucp), and creates host/.venv.
+- Optional cloud fallback: ~/.config/eve/cloud.env (provider=groq or openai,
+  key=...). Only phrases that local transcription is slow on are sent.
+
+Steps:
+1. Run `python3 host/desktop.py` and tell me which desktop it found. If it
+   says "not supported", stop and explain my options (for now, an X11 session).
+2. Run `host/install.sh --dry-run`, show me what it would do, then run
+   `host/install.sh` once I agree. It uses sudo; I'll type the password. If it
+   added me to a group, tell me to log out and back in before testing.
+3. Ask me whether the stick is already flashed. If not: flashing needs
+   PlatformIO (the Atech drivers eve uses are in firmware/lib/atech). Help me
+   install it if `pio` isn't found, then run `cd firmware && pio run -t upload`. The button light blinks green once when
+   it's done; if not, I replug the stick. If the upload can't connect, I hold
+   the board's BOOT button while plugging it in and you try again.
+4. Test with `host/.venv/bin/python host/voicetype.py --dry-run`, which prints
+   the text instead of typing it. It runs until stopped, so start it in the
+   background and read its output. The first run downloads the speech model
+   (base.en is about 150 MB, small.en about 480 MB). Ask me to hold the button
+   and say something, and check what it heard. Then run it without --dry-run
+   and have me dictate into a text editor.
+5. Ask me whether eve should start at login. If so, run
+   `host/install-autostart.sh --model small.en`. If it prints a line to add to
+   my compositor's config, show it to me and ask before adding it.
+6. Ask me whether I want the cloud fallback. If so, tell me how to create
+   ~/.config/eve/cloud.env myself (chmod 600). Don't ask me to paste the API
+   key into this chat.
+
+Rules:
+- Ask before using sudo, before editing config files outside this repo, and
+  before flashing.
+- Only one program can use the stick's serial port at a time. Stop eve
+  (`pkill -f host/voicetype.py`) before flashing or starting another copy.
+- eve has to run inside my desktop session. If it can't find my desktop (for
+  example, because you're connected over SSH), ask me to start it from a
+  terminal on the desktop.
+- When something fails, check the Troubleshooting section of README.md and
+  the log first. The first log lines name the detected desktop; when eve
+  runs from autostart, the log is ~/.cache/voicetype.log. Don't change the
+  code to work around a setup problem without asking me.
+```
 
 ### 1. Install the desktop app
 
 ```bash
 git clone https://github.com/TomasHarmer/eve && cd eve
-sudo apt install xdotool
-python3 -m venv host/.venv
-host/.venv/bin/pip install -r host/requirements.txt
+host/install.sh
 ```
+
+The script detects your desktop and installs the typing tools it needs
+(with apt, pacman, dnf or zypper). It also adds you to the serial-port group
+if needed (`dialout` or `uucp`; log out and back in afterwards), and sets up
+the Python environment in `host/.venv`. Run `host/install.sh --dry-run` first
+to see what it would do, or `python3 host/desktop.py` to see only what it
+detected.
 
 ### 2. Flash the stick
 
-You need [PlatformIO](https://platformio.org) and the Atech driver library.
-Get the driver library through [atech.dev](https://atech.dev).
+You need [PlatformIO](https://platformio.org). The Atech drivers eve uses are
+included in `firmware/lib/atech`.
 
 ```bash
-export ATECH_LIB=/path/to/atech/firmware/esp32
 cd firmware
 pio run -t upload
 ```
@@ -109,6 +191,12 @@ To start it automatically every time you log in:
 ```bash
 host/install-autostart.sh --model small.en
 ```
+
+(or `host/install.sh --autostart --model small.en` in one go). This writes a
+launcher, `~/.config/eve/start.sh`, and an XDG autostart entry that runs it.
+GNOME, KDE and XFCE run that entry. Hyprland and Sway only do when started
+through a session manager such as `uwsm`. When none is running, the script
+prints the line to add to your compositor's config instead.
 
 It logs to `~/.cache/voicetype.log`, which shows each phrase, how long it took
 and whether it was transcribed locally or in the cloud. To stop or restart it:
@@ -214,6 +302,7 @@ plugged in.
 | `--forget-device` | forget which boards are eve and look again |
 | `--port /dev/ttyACM0` | use this port instead of finding eve automatically |
 | `--dry-run` | print the text instead of typing it |
+| `--desktop hyprland` | type the way this desktop needs instead of detecting it (`hyprland`, `sway`, `wayland`, `x11`) |
 | `--save-wav last.wav` | keep the last recording, for checking the mic |
 | `-v` | also show the stick's log lines |
 
@@ -245,6 +334,12 @@ Put those pins into `MIC_*` in `firmware/src/main.cpp`.
 also throttle on a low battery or in power-saver mode. Turn on the cloud
 fallback, or use the faster `base.en` model.
 
+**Nothing gets typed.** The first lines of the log say which desktop eve
+detected (`Hyprland: types with wtype, switches windows with hyprctl`). If it
+names the wrong one, eve was started outside your desktop session, without its
+environment (`WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`, ...). Start it
+from your compositor's config, as above, or force one with `--desktop`.
+
 **Wrong words.** Use `--model small.en` and the cloud fallback. If a word keeps
 coming out wrong (a product or project name), add it to the vocabulary hint
 with `--prompt`.
@@ -255,16 +350,63 @@ with `--prompt`.
 firmware/            PlatformIO project for the stick (ESP32-S3, Arduino)
   src/main.cpp       recording, button gestures, USB wire protocol
   diag/diag.cpp      microphone wiring diagnostic
+  lib/atech/         the Atech microphone and button drivers
 host/
   voicetype.py       desktop app: finding eve, VAD phrase splitting,
                      local + cloud Whisper, typing into the right window
+  desktop.py         per-desktop typing and window switching
+  install.sh         installs what your desktop needs, plus the venv
   install-autostart.sh
 assets/logo.svg
 ```
 
 The USB protocol is small and documented at the top of `firmware/src/main.cpp`.
-It's a good starting point for a different front end, such as a macOS or
-Wayland typer.
+It's a good starting point for a different front end, such as a macOS typer.
+
+### Adding a desktop
+
+Everything desktop-specific lives in `host/desktop.py`. A desktop is a
+**keyboard**, which sends text and keys (`Xdotool`, `Wtype`), plus a
+**window tracker**, which finds the focused window and focuses one by id
+(`XdotoolWindows`, `HyprlandWindows`, `SwayWindows`). To support another one:
+
+1. Write the parts it's missing. A `Windows` subclass implements `active()`,
+   `title(w)` and `focus(w)`, and lists the commands it uses in `tools`.
+   `focus` should return only once the focus has actually moved.
+2. Add a `Desktop(...)` line to `DESKTOPS`, with a `matches` function that
+   recognizes the session from its environment. The list is checked in order,
+   so put it before any more general entry it overlaps with (for example,
+   before plain `wayland`).
+3. If a tool's package name differs from its command, give it in
+   `Tool(..., packages={"apt": "..."})`. Tools that ship with the desktop
+   itself are `bundled=True`.
+
+`install.sh` and `voicetype.py --desktop` pick the new entry up from there.
+Check it with `python3 host/desktop.py --desktop yourname`.
+
+**GNOME and KDE on Wayland** are the obvious next ones. Neither lets ordinary
+apps use the virtual-keyboard protocol wtype relies on, so they need a
+different keyboard. One option is a uinput tool such as `dotool`, which works
+on any desktop but needs access to `/dev/uinput` and must be told the
+keyboard layout. The other is the RemoteDesktop portal, which needs a one-time
+permission prompt. Switching windows would need KWin scripting on KDE and a
+Shell extension on GNOME.
+
+### Adding modules
+
+eve uses two Atech modules, the microphone and the button, and
+`firmware/lib/atech` has only their drivers. To add another module (a speaker,
+a display, a sensor), get it from the [**Atech SDK**](https://atech.dev/docs#own-agent),
+which has the drivers and API for every Atech module:
+
+```bash
+pip install atech
+```
+
+`atech guide` explains how to use the SDK, including with a coding agent.
+Copy the module's driver files into `firmware/lib/atech`, and its `lib_deps`
+from its `module.yaml` into `firmware/platformio.ini`. The SDK also installs
+PlatformIO.
 
 ## Credits
 

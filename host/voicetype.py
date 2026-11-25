@@ -3,9 +3,10 @@
 voicetype — push-to-talk dictation from the Atech Tiny voice stick.
 
 Hold the stick's button and talk. Each phrase is typed into the window you
-started in as soon as you pause (X11, via xdotool); you don't have to let go
-first. Transcription runs locally with faster-whisper, with an optional cloud
-fallback (~/.config/eve/cloud.env) for when the computer is busy.
+started in as soon as you pause (xdotool on X11, wtype + hyprctl on Hyprland);
+you don't have to let go first. Transcription runs locally with faster-whisper,
+with an optional cloud fallback (~/.config/eve/cloud.env) for when the computer
+is busy.
 
     host/.venv/bin/python host/voicetype.py                   # default: base.en, live
     host/.venv/bin/python host/voicetype.py --model small.en  # more accurate, ~3x slower
@@ -19,11 +20,11 @@ See ../firmware/src/main.cpp for the wire protocol.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import queue
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -35,6 +36,8 @@ from dataclasses import dataclass
 import numpy as np
 import serial
 from serial.tools import list_ports
+
+import desktop
 
 SAMPLE_RATE = 16000
 BYTES_PER_SEC = SAMPLE_RATE * 2
@@ -417,35 +420,32 @@ class PhraseSplitter:
 
 
 # ---------------------------------------------------------------------- typing
+# How text gets typed and windows refocused depends on the desktop: see
+# desktop.py. main() sets this from detect() (or --desktop); until then, and
+# with --dry-run, nothing is typed and no windows are tracked.
+desk = desktop.Desktop("dry-run", "dry run", lambda env: False, keyboard=None)
+
+
 def type_text(text: str) -> None:
-    # A few words per xdotool call, checking before each that the target
-    # window still has focus: a long phrase takes a second or two to type,
-    # and you may click away in the middle of it.
+    # A few words per call, checking before each that the target window
+    # still has focus: a long phrase takes a second or two to type, and you
+    # may click away in the middle of it.
     for chunk in re.findall(r".{1,24}(?:\s+|$)|\S+", text, re.S):
         in_window.ensure()
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "4", "--", chunk], check=True)
+        desk.keyboard.type(chunk)
 
 
 def press_key(key: str, repeat: int = 1) -> None:
     in_window.ensure()
-    subprocess.run(["xdotool", "key", "--clearmodifiers", "--repeat", str(repeat), "--repeat-delay", "2", key],
-                   check=True)
+    desk.keyboard.key(key, repeat)
 
 
 def active_window() -> str | None:
-    try:
-        r = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=2)
-        return r.stdout.strip() or None
-    except Exception:
-        return None
+    return desk.windows.active()
 
 
 def window_name(w: str | None) -> str:
-    try:
-        r = subprocess.run(["xdotool", "getwindowname", w], capture_output=True, text=True, timeout=2)
-        return r.stdout.strip()[:40]
-    except Exception:
-        return "?"
+    return desk.windows.title(w)[:40] if w else "?"
 
 
 class WindowGone(Exception):
@@ -466,11 +466,8 @@ class in_window:
 
     @staticmethod
     def _activate(w: str) -> bool:
-        try:
-            r = subprocess.run(["xdotool", "windowactivate", "--sync", w], capture_output=True, timeout=3)
-        except subprocess.TimeoutExpired:
-            return False
-        return r.returncode == 0 and active_window() == w
+        desk.windows.focus(w)
+        return active_window() == w
 
     @classmethod
     def ensure(cls) -> None:
@@ -496,14 +493,10 @@ class in_window:
     def __exit__(self, *exc):
         in_window.target, in_window._current = None, None
         # Return only if eve still holds the focus: if you've clicked somewhere
-        # else again since, stay there. --sync so the next action sees the
-        # real focus, not one still changing.
+        # else again since, stay there. focus() waits for the switch, so the
+        # next action sees the real focus, not one still changing.
         if self.back and active_window() == self.window:
-            try:
-                subprocess.run(["xdotool", "windowactivate", "--sync", self.back],
-                               capture_output=True, timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
+            desk.windows.focus(self.back)
         return False
 
 
@@ -514,7 +507,7 @@ class Job:
     pcm: bytes
     final: bool      # last piece of the dictation (button released)
     kind: str = "audio"   # or "tap" / "double": button gestures, handled in order
-    window: str | None = None  # X window that had focus when the button was pressed
+    window: str | None = None  # window (X11 id or Hyprland address) focused when the button was pressed
 
 
 class App:
@@ -799,6 +792,8 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--max-seconds", type=int, default=120, help="cap for one dictation in --no-live mode")
     ap.add_argument("--dry-run", action="store_true", help="print text instead of typing it")
+    ap.add_argument("--desktop", choices=[d.name for d in desktop.DESKTOPS],
+                    help="type the way this desktop needs instead of detecting it")
     ap.add_argument("--save-wav", metavar="PATH", help="save each recording (debugging the mic)")
     ap.add_argument("-v", "--verbose", action="store_true", help="also show device log lines")
     args = ap.parse_args()
@@ -813,10 +808,24 @@ def main() -> None:
     for noisy in ("httpx", "huggingface_hub", "faster_whisper"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    if not args.dry_run and not shutil.which("xdotool"):
-        sys.exit("xdotool is not installed: sudo apt install xdotool")
-    if not os.environ.get("DISPLAY") and not args.dry_run:
-        sys.exit("DISPLAY is not set — run this inside your X11 session")
+    if not args.dry_run:
+        global desk
+        try:
+            found = desktop.by_name(args.desktop) if args.desktop else desktop.detect()
+        except KeyError as e:
+            sys.exit(e.args[0])
+        if found is None:
+            sys.exit("no desktop session found (neither WAYLAND_DISPLAY nor DISPLAY is set): "
+                     "run eve inside your desktop session")
+        if found.unsupported:
+            sys.exit(found.describe())
+        missing = found.missing()
+        if missing:
+            fix = ("it normally comes with " + found.label if all(t.bundled for t in missing)
+                   else "run host/install.sh")
+            sys.exit(f"{', '.join(t.command for t in missing)} not installed, needed on {found.label}: {fix}")
+        desk = found
+        log.info("%s", desk.describe())
 
     try:
         App(args).run()
