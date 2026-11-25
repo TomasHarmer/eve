@@ -116,9 +116,8 @@ Steps:
    `host/install.sh` once I agree. It uses sudo; I'll type the password. If it
    added me to a group, tell me to log out and back in before testing.
 3. Ask me whether the stick is already flashed. If not: flashing needs
-   PlatformIO and the Atech driver library (from atech.dev), with ATECH_LIB set
-   to the library's firmware/esp32 folder. Help me get those, then run
-   `cd firmware && pio run -t upload`. The button light blinks green once when
+   PlatformIO (the Atech drivers eve uses are in firmware/lib/atech). Help me
+   install it if `pio` isn't found, then run `cd firmware && pio run -t upload`. The button light blinks green once when
    it's done; if not, I replug the stick. If the upload can't connect, I hold
    the board's BOOT button while plugging it in and you try again.
 4. Test with `host/.venv/bin/python host/voicetype.py --dry-run`, which prints
@@ -164,11 +163,10 @@ detected.
 
 ### 2. Flash the stick
 
-You need [PlatformIO](https://platformio.org) and the Atech driver library.
-Get the driver library through [atech.dev](https://atech.dev).
+You need [PlatformIO](https://platformio.org). The Atech drivers eve uses are
+included in `firmware/lib/atech`.
 
 ```bash
-export ATECH_LIB=/path/to/atech/firmware/esp32
 cd firmware
 pio run -t upload
 ```
@@ -352,6 +350,7 @@ with `--prompt`.
 firmware/            PlatformIO project for the stick (ESP32-S3, Arduino)
   src/main.cpp       recording, button gestures, USB wire protocol
   diag/diag.cpp      microphone wiring diagnostic
+  lib/atech/         the Atech microphone and button drivers
 host/
   voicetype.py       desktop app: finding eve, VAD phrase splitting,
                      local + cloud Whisper, typing into the right window
@@ -392,6 +391,22 @@ on any desktop but needs access to `/dev/uinput` and must be told the
 keyboard layout. The other is the RemoteDesktop portal, which needs a one-time
 permission prompt. Switching windows would need KWin scripting on KDE and a
 Shell extension on GNOME.
+
+### Adding modules
+
+eve uses two Atech modules, the microphone and the button, and
+`firmware/lib/atech` has only their drivers. To add another module (a speaker,
+a display, a sensor), get it from the [**Atech SDK**](https://atech.dev/docs#own-agent),
+which has the drivers and API for every Atech module:
+
+```bash
+pip install atech
+```
+
+`atech guide` explains how to use the SDK, including with a coding agent.
+Copy the module's driver files into `firmware/lib/atech`, and its `lib_deps`
+from its `module.yaml` into `firmware/platformio.ini`. The SDK also installs
+PlatformIO.
 
 ## Credits
 

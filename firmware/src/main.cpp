@@ -34,8 +34,8 @@
 #include "freertos/stream_buffer.h"
 #include "esp_task_wdt.h"
 
-#include "modules/microphone.h"
-#include "modules/button.h"
+#include "microphone.h"
+#include "button.h"
 
 // ---- pins (Tiny board) ------------------------------------------------------
 // Measured on the real board (firmware/diag): the mic only answers with its
