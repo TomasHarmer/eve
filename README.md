@@ -128,7 +128,11 @@ cloud speech service instead:
 - If the local result isn't ready within **1 second**, or the local model is
   still busy with an earlier phrase, that phrase is also sent to the cloud, and
   whichever answer arrives first is typed.
-- If the cloud is unreachable, eve carries on locally.
+- eve keeps track of how fast your computer has been lately. While local
+  transcription is taking longer than that second anyway, it asks the cloud
+  straight away instead of waiting first.
+- A cloud request that hangs is retried once after 4 seconds. If the cloud is
+  unreachable, eve carries on locally.
 
 [Groq](https://console.groq.com) is the fastest choice (about half a second per
 phrase, with a free tier). Create an API key there, then:
@@ -205,7 +209,7 @@ plugged in.
 | Flag | What it does |
 |---|---|
 | `--model small.en` | more accurate, especially on technical words. About 3× slower than the default `base.en`, which the cloud fallback makes up for |
-| `--cloud-after 1` | seconds to wait for local transcription before asking the cloud. Default `1`. `0` sends every phrase to the cloud straight away |
+| `--cloud-after 1` | seconds to wait for local transcription before asking the cloud. Default `1`, skipped while local has been slower than that. `0` sends every phrase to the cloud straight away |
 | `--no-cloud` | never use the cloud, even if `cloud.env` is set up |
 | `--pause 0.4` | how long a pause (seconds) ends a phrase. Default `0.4` |
 | `--enter` | also press Enter every time you let go |

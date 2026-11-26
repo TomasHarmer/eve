@@ -250,16 +250,20 @@ def load_cloud_config() -> tuple[str, str] | None:
 
 
 class CloudWhisper:
+    TIMEOUT = 4.0   # a healthy request takes ~0.3 s; past this it's stuck, retry
+
     def __init__(self, provider: str, key: str, prompt: str | None):
+        from urllib.parse import urlsplit
         self.url, self.model, _ = CLOUD_PROVIDERS[provider]
         self.provider, self.key, self.prompt = provider, key, prompt
+        u = urlsplit(self.url)
+        self.host, self.path = u.netloc, u.path
+        self.idle: list = []          # kept-alive HTTPS connections, saves a TLS handshake
+        self.idle_lock = threading.Lock()
 
-    def transcribe(self, audio: np.ndarray, context: str = "") -> str:
+    def _body(self, audio: np.ndarray, context: str) -> tuple[bytes, str]:
         import io
-        import json
-        import urllib.request
         import uuid
-
         wav = io.BytesIO()
         with wave.open(wav, "wb") as w:
             w.setnchannels(1)
@@ -277,51 +281,114 @@ class CloudWhisper:
         body += (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="eve.wav"\r\n'
                  "Content-Type: audio/wav\r\n\r\n").encode()
         body += wav.getvalue() + f"\r\n--{b}--\r\n".encode()
-        req = urllib.request.Request(self.url, data=bytes(body), method="POST", headers={
-            "Authorization": f"Bearer {self.key}",
-            "Content-Type": f"multipart/form-data; boundary={b}",
-            "User-Agent": "eve-voicetype",
-        })
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return json.load(r).get("text", "").strip()
+        return bytes(body), b
+
+    def _post(self, body: bytes, boundary: str) -> str:
+        import http.client
+        import json
+        with self.idle_lock:
+            conn = self.idle.pop() if self.idle else None
+        reused = conn is not None
+        if conn is None:
+            conn = http.client.HTTPSConnection(self.host, timeout=self.TIMEOUT)
+        try:
+            conn.request("POST", self.path, body=body, headers={
+                "Authorization": f"Bearer {self.key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "eve-voicetype",
+            })
+            r = conn.getresponse()
+            data = r.read()
+        except (http.client.HTTPException, ConnectionError) as e:
+            conn.close()
+            if reused:   # the server closed the idle connection; that's normal, go again
+                return self._post(body, boundary)
+            raise OSError(str(e)) from e
+        except Exception:
+            conn.close()
+            raise
+        if r.status != 200:
+            conn.close()
+            raise OSError(f"HTTP {r.status}: {data[:200].decode(errors='replace')}")
+        with self.idle_lock:
+            self.idle.append(conn)
+        return json.loads(data).get("text", "").strip()
+
+    def transcribe(self, audio: np.ndarray, context: str = "") -> str:
+        body, boundary = self._body(audio, context)
+        try:
+            return self._post(body, boundary)
+        except Exception as e:
+            if isinstance(e, OSError) and str(e).startswith("HTTP 4"):
+                raise   # bad key, bad request: retrying won't help
+            log.info("cloud request failed (%s); retrying once", e)
+            return self._post(body, boundary)
 
 
 class Hybrid:
     """Local first. If the local model hasn't answered within `wait` seconds,
     or is still busy with an earlier phrase, ask the cloud and use whichever
-    answer arrives first. Falls back to local if the cloud fails."""
+    answer arrives first. Falls back to local if the cloud fails.
+
+    The local model's recent speed is tracked, so when it's been taking longer
+    than `wait` anyway (a busy CPU), the cloud is asked straight away rather
+    than after a wasted wait."""
 
     def __init__(self, local: LocalWhisper, cloud: CloudWhisper | None, wait: float):
         self.local, self.cloud, self.wait = local, cloud, wait
         self.local_free = threading.Lock()
+        self.local_secs: float | None = None   # recent local transcription time (moving average)
+
+    def _note_local(self, secs: float) -> None:
+        self.local_secs = secs if self.local_secs is None else 0.7 * self.local_secs + 0.3 * secs
 
     def transcribe(self, audio: np.ndarray, context: str = "") -> tuple[str, str]:
         if self.cloud is None:
             with self.local_free:
                 return self.local.transcribe(audio, context), "local"
-        result: dict = {}
-        done = threading.Event()
+        answers: queue.Queue = queue.Queue()   # (source, text or None on failure)
         started = self.local_free.acquire(blocking=False)
+        local_pending = started
         if started:
-            def run():
+            def run_local():
+                t0 = time.time()
                 try:
-                    result["text"] = self.local.transcribe(audio, context)
+                    answers.put(("local", self.local.transcribe(audio, context)))
+                    self._note_local(time.time() - t0)
                 except Exception as e:
                     log.warning("local transcription failed (%s)", e)
+                    answers.put(("local", None))
                 finally:
                     self.local_free.release()
-                    done.set()
-            threading.Thread(target=run, daemon=True).start()
-            if done.wait(self.wait):
-                return result.get("text", ""), "local"
-        try:
-            text = self.cloud.transcribe(audio, context)
-            return text, f"{self.cloud.provider}, local {'slow' if started else 'busy'}"
-        except Exception as e:
-            log.warning("cloud transcription failed (%s); using local", e)
+            threading.Thread(target=run_local, daemon=True).start()
+            slow = self.local_secs is not None and self.local_secs > self.wait
+            if not slow:
+                try:
+                    src, text = answers.get(timeout=self.wait)
+                    if text is not None:
+                        return text, "local"
+                    local_pending = False
+                except queue.Empty:
+                    pass
+        why = "busy" if not started else ("slow" if self.local_secs is None or self.local_secs > self.wait else "late")
+
+        def run_cloud():
+            try:
+                answers.put(("cloud", self.cloud.transcribe(audio, context)))
+            except Exception as e:
+                log.warning("cloud transcription failed (%s); using local", e)
+                answers.put(("cloud", None))
+        threading.Thread(target=run_cloud, daemon=True).start()
+
+        pending = {"cloud"} | ({"local"} if local_pending else set())
+        while pending:
+            src, text = answers.get()
+            pending.discard(src)
+            if text is not None:
+                return text, ("local" if src == "local" else f"{self.cloud.provider}, local {why}")
+        # Both failed, or the cloud failed while local was busy with an earlier phrase.
         if started:
-            done.wait()
-            return result.get("text", ""), "local"
+            return "", "local"
         with self.local_free:
             return self.local.transcribe(audio, context), "local"
 
@@ -794,7 +861,7 @@ def main() -> None:
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="vocabulary hint for whisper")
     ap.add_argument("--no-prompt", action="store_true", help="disable the vocabulary hint")
     ap.add_argument("--cloud-after", type=float, default=1.0,
-                    help="seconds to wait for local transcription before asking the cloud (default 1)")
+                    help="seconds to wait for local transcription before asking the cloud (default 1; skipped when local has lately been slower than this)")
     ap.add_argument("--no-cloud", action="store_true", help="never use the cloud, even if cloud.env is set up")
     ap.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--max-seconds", type=int, default=120, help="cap for one dictation in --no-live mode")
