@@ -815,6 +815,13 @@ class App:
             except serial.SerialException:
                 pass
 
+    def heartbeat(self) -> None:
+        """Tell the stick every second that the app is connected; while these
+        keep coming, its light pulses softly."""
+        while True:
+            self.tell_device(b"P")
+            time.sleep(1.0)
+
     # -- worker: transcribe + type in order, off the serial thread
     def worker(self) -> None:
         current = -1
@@ -1023,6 +1030,7 @@ class App:
     # -- serial loop with automatic reconnect
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=self.heartbeat, daemon=True).start()
         link = "usb" if self.args.port else self.args.link
         self.use_ble = link != "usb" and ble_available()
         if link == "ble" and not self.use_ble:

@@ -35,7 +35,9 @@
  *
  * Host -> device (single bytes, drive the button light):
  *   'B' busy/transcribing (amber)   'K' done (green flash)
- *   'X' error (red flash)           'I' idle (off)
+ *   'X' error (red flash)           'I' idle
+ *   'P' heartbeat, sent every second by the host app. While they keep
+ *       coming, the idle light pulses softly in eve blue: "connected".
  *   '?' identify: the device answers with an 'H' packet. The host uses this
  *       to tell eve apart from other ESP32 boards on the same computer.
  */
@@ -275,13 +277,18 @@ static void drainAudio() {
 // ---- light ------------------------------------------------------------------
 enum LightState { L_IDLE, L_RECORDING, L_BUSY, L_FLASH };
 static LightState lightState = L_IDLE;
+static uint32_t   lastHostMs = 0;          // last byte from the host app (heartbeat or command)
+static const uint32_t HOST_ALIVE_MS = 3500;  // missed ~3 heartbeats: app gone, stop pulsing
+static const uint32_t PULSE_MS = 3000;       // one soft breath
+
+static bool hostAlive() { return lastHostMs && millis() - lastHostMs < HOST_ALIVE_MS; }
 static uint32_t   lightSince = 0;
 
 static void setLight(LightState s) {
     lightState = s;
     lightSince = millis();
     switch (s) {
-        case L_IDLE:      button.off();                 break;
+        case L_IDLE:      button.off();                 break;   // serviceLight pulses it
         case L_RECORDING: button.setColor(255, 0, 0);   break;
         case L_BUSY:      button.setColor(255, 120, 0); break;
         case L_FLASH:     /* colour set by caller */    break;
@@ -297,6 +304,28 @@ static void serviceLight() {
     uint32_t age = millis() - lightSince;
     if (lightState == L_FLASH && age > 350)          setLight(L_IDLE);
     if (lightState == L_BUSY  && age > HOST_WAIT_MS) setLight(L_IDLE);
+
+    // Idle and the app is connected: breathe softly in eve blue (#4fc3f7).
+    static uint32_t lastPulse = 0;
+    static bool     pulsing   = false;
+    if (lightState == L_IDLE) {
+        if (hostAlive()) {
+            uint32_t now = millis();
+            if (now - lastPulse >= 20) {
+                lastPulse = now;
+                float t = (float)(now % PULSE_MS) / PULSE_MS;
+                float level = 0.5f - 0.5f * cosf(2.0f * PI * t);   // 0..1, smooth
+                float k = 0.04f + 0.30f * level * level;            // dim floor, soft peak
+                button.setColor((uint8_t)(79 * k), (uint8_t)(195 * k), (uint8_t)(247 * k));
+                pulsing = true;
+            }
+        } else if (pulsing) {
+            button.off();
+            pulsing = false;
+        }
+    } else {
+        pulsing = false;
+    }
 }
 
 static int nextHostByte() {
@@ -309,6 +338,8 @@ static int nextHostByte() {
 static void readHost() {
     int c;
     while ((c = nextHostByte()) >= 0) {
+        lastHostMs = millis();
+        if (c == 'P') continue;                     // heartbeat: only keeps the pulse going
         if (c == '?') {                             // "who are you?" from the host
             sendPacket('H', (const uint8_t*)"eve", 3);
             continue;

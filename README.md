@@ -191,6 +191,8 @@ The button light shows what's happening:
 | Light | Meaning |
 |---|---|
 | green blink at power-up | firmware booted |
+| **soft blue pulse** | connected: the app is running and talking to the stick (USB or Bluetooth) |
+| off | not connected: the app isn't running, or can't reach the stick |
 | **red** | listening |
 | **amber** | finishing the last phrase |
 | green flash | typed |
