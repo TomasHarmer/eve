@@ -18,6 +18,9 @@
  *     'A'  recording aborted — it was only a tap; discard it (len 0)
  *     'T'  single tap                   (len 0)  host: Enter if text waiting, else Tab
  *     'N'  double tap                   (len 0)  host: delete the waiting text
+ *     'M'  three or more taps           (len 1: uint8 tap count)
+ *          host: 3 = open the window picker; while it's open, the next
+ *          taps (T = 1, N = 2, M = count) pick that window
  *     'C'  audio, IMA-ADPCM compressed (BLE only; USB sends 'D'):
  *          int16 predictor, uint8 step index, uint16 sample count, then
  *          4-bit codes, low nibble first. Each block decodes on its own.
@@ -364,27 +367,34 @@ static void abortRecording() {
 }
 
 // ---- taps -------------------------------------------------------------------
-static bool     haveTap     = false;   // a first tap is waiting for its partner
+// Taps less than DOUBLE_TAP_MS apart count as one gesture. Its count is only
+// known once that much time has passed with no further press.
+static uint8_t  tapCount    = 0;       // taps in the gesture so far (0 = none waiting)
 static uint32_t tapReleased = 0;
 
 static void registerTap(uint32_t pressedAt) {
-    if (haveTap && pressedAt - tapReleased <= DOUBLE_TAP_MS) {
-        haveTap = false;
-        sendPacket('N', nullptr, 0);
-        flash(200, 0, 255);            // violet: double tap (clear)
+    if (tapCount && pressedAt - tapReleased <= DOUBLE_TAP_MS) {
+        if (tapCount < 255) tapCount++;
     } else {
-        haveTap     = true;            // wait to see if a second tap follows
-        tapReleased = millis();
+        tapCount = 1;
     }
+    tapReleased = millis();
 }
 
-// A lone tap is only known to be single once the double-tap window has passed
-// without another press.
 static void serviceTaps() {
-    if (haveTap && !button.isPressed() && millis() - tapReleased > DOUBLE_TAP_MS) {
-        haveTap = false;
-        sendPacket('T', nullptr, 0);
-        flash(0, 120, 255);            // blue: single tap (Enter / Tab)
+    if (tapCount && !button.isPressed() && millis() - tapReleased > DOUBLE_TAP_MS) {
+        uint8_t n = tapCount;
+        tapCount = 0;
+        if (n == 1) {
+            sendPacket('T', nullptr, 0);
+            flash(0, 120, 255);        // blue: single tap (Enter / Tab)
+        } else if (n == 2) {
+            sendPacket('N', nullptr, 0);
+            flash(200, 0, 255);        // violet: double tap (clear)
+        } else {
+            sendPacket('M', &n, 1);
+            flash(255, 255, 255);      // white: three or more taps (window picker)
+        }
     }
 }
 
@@ -423,7 +433,7 @@ void mainTask(void* /*parameter*/) {
             } else {
                 tailing    = true;
                 releasedAt = millis();
-                haveTap    = false;            // tap-then-hold is dictation, not a tap
+                tapCount   = 0;                // tap-then-hold is dictation, not a tap
             }
         }
 

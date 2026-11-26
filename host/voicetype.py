@@ -11,7 +11,8 @@ connects over USB or Bluetooth LE: --link auto (default), usb or ble.
     host/.venv/bin/python host/voicetype.py                   # default: base.en, live
     host/.venv/bin/python host/voicetype.py --model small.en  # more accurate, ~3x slower
     host/.venv/bin/python host/voicetype.py --enter           # press Enter on release
-                                                              # (or tap the button: Enter / Tab)
+                                                              # (or tap the button: Enter / Tab;
+                                                              #  triple-tap, then N taps: window N)
     host/.venv/bin/python host/voicetype.py --no-live         # type everything on release
 
 See ../firmware/src/main.cpp for the wire protocol.
@@ -42,7 +43,7 @@ BYTES_PER_SEC = SAMPLE_RATE * 2
 MAGIC = b"\xa5\x5a"
 ESPRESSIF_VID = 0x303A
 MAX_PAYLOAD = 4096
-PACKET_TYPES = b"SDEANTHC"
+PACKET_TYPES = b"SDEANTHCM"
 STALL_SECONDS = 3.0  # a recording with no packets this long is finalized anyway
 
 CLEAR_LINES = 6  # Ctrl+U presses when clearing a prompt; each clears one line
@@ -681,10 +682,35 @@ def active_window() -> str | None:
         return None
 
 
-def window_name(w: str | None) -> str:
+def list_windows() -> list[tuple[str, str]]:
+    """App windows (id, title), oldest first: the window manager's own
+    _NET_CLIENT_LIST order, so a window keeps its number until it closes.
+    Skips the desktop, docks, and anything kept off the taskbar."""
+    try:
+        r = subprocess.run(["xprop", "-root", "_NET_CLIENT_LIST"], capture_output=True, text=True, timeout=2)
+        ids = re.findall(r"0x[0-9a-fA-F]+", r.stdout.split("#", 1)[-1])
+    except Exception:
+        return []
+    wins = []
+    for w in ids:
+        try:
+            r = subprocess.run(["xprop", "-id", w, "_NET_WM_WINDOW_TYPE", "_NET_WM_STATE"],
+                               capture_output=True, text=True, timeout=2)
+        except Exception:
+            continue
+        props = r.stdout
+        untyped = "_NET_WM_WINDOW_TYPE:  not found" in props   # no type set means normal
+        if not (untyped or "_NET_WM_WINDOW_TYPE_NORMAL" in props) or "SKIP_TASKBAR" in props:
+            continue
+        wid = str(int(w, 16))   # decimal, like xdotool's ids
+        wins.append((wid, window_name(wid, 60) or "(untitled)"))
+    return wins
+
+
+def window_name(w: str | None, width: int = 40) -> str:
     try:
         r = subprocess.run(["xdotool", "getwindowname", w], capture_output=True, text=True, timeout=2)
-        return r.stdout.strip()[:40]
+        return r.stdout.strip()[:width]
     except Exception:
         return "?"
 
@@ -754,7 +780,8 @@ class Job:
     dictation: int   # which button-hold this audio belongs to
     pcm: bytes
     final: bool      # last piece of the dictation (button released)
-    kind: str = "audio"   # or "tap" / "double": button gestures, handled in order
+    kind: str = "audio"   # or "tap" / "double" / "multi": button gestures, handled in order
+    taps: int = 0         # for "multi": how many taps
     window: str | None = None  # X window that had focus when the button was pressed
 
 
@@ -774,6 +801,9 @@ class App:
         self.unsent = 0   # characters eve has typed that no Enter has sent yet
         self.tabbed = False  # eve pressed Tab (accepted a suggestion) that no Enter has sent yet
         self.text_window: str | None = None  # where that unsent text / Tab went
+        self.picker: list[tuple[str, str]] = []   # (window, title) while the window picker is open
+        self.picker_until = 0.0
+        self.picker_note: str | None = None      # notification id, to replace it
         self.port: serial.Serial | None = None
         self.port_lock = threading.Lock()
 
@@ -792,10 +822,21 @@ class App:
         typed_any = False
         while True:
             job = self._next_job()
-            if job.kind in ("tap", "double"):
+            if job.kind in ("tap", "double", "multi"):
                 # Queued behind any text still being typed, so it acts after it.
-                self.gesture(job.kind, job.window)
+                taps = {"tap": 1, "double": 2}.get(job.kind, job.taps)
+                if self.picker and time.time() < self.picker_until:
+                    self.pick_window(taps)
+                elif job.kind == "multi":
+                    if taps == 3:
+                        self.open_picker()
+                    else:
+                        log.info("%d taps: nothing to do (triple-tap opens the window picker)", taps)
+                else:
+                    self.picker = []
+                    self.gesture(job.kind, job.window)
                 continue
+            self.picker = []   # talking closes the window picker
             if job.dictation != current:
                 current, context, typed_any = job.dictation, "", False
             try:
@@ -828,6 +869,60 @@ class App:
             except Exception:
                 log.exception("transcription failed")
                 self.tell_device(b"X")
+
+    # -- window picker: triple-tap shows your windows numbered; then tap N times
+    PICKER_SECONDS = 8.0
+
+    def _notify(self, title: str, body: str = "") -> None:
+        cmd = ["notify-send", "-a", "eve", "-p", "-u", "low", title, body]
+        if self.picker_note:
+            cmd[1:1] = ["-r", self.picker_note]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            self.picker_note = r.stdout.strip() or self.picker_note
+        except Exception:
+            pass
+
+    def open_picker(self) -> None:
+        wins = list_windows()
+        if not wins:
+            log.info("triple tap -> window picker: no windows found")
+            self.tell_device(b"X")
+            return
+        self.picker, self.picker_until = wins, time.time() + self.PICKER_SECONDS
+        lines = [f"{i}  {'●' if w == active_window() else ' '} {t}" for i, (w, t) in enumerate(wins, 1)]
+        log.info("triple tap -> window picker:\n  %s", "\n  ".join(lines))
+        if self.args.dry_run:
+            print("[window picker]", *lines, sep="\n", flush=True)
+        else:
+            self._notify("Tap the window number", "\n".join(lines[:15]))
+
+    def pick_window(self, n: int) -> None:
+        wins, self.picker = self.picker, []
+        if not 1 <= n <= len(wins):
+            log.info("window picker: no window %d", n)
+            self._notify(f"No window {n}")
+            self.tell_device(b"X")
+            return
+        w, title = wins[n - 1]
+        log.info("window picker -> %d: %s", n, title)
+        if self.args.dry_run:
+            print(f"[window {n}: {title}]", flush=True)
+            return
+        try:
+            r = subprocess.run(["xdotool", "windowactivate", "--sync", w], capture_output=True, timeout=3)
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            ok = False
+        if not ok:
+            self._notify(f"Couldn't switch to window {n}", title)
+            self.tell_device(b"X")
+            return
+        # You've moved on: taps now act on the window you picked, not on
+        # text eve left waiting in the old one.
+        self.unsent, self.tabbed, self.text_window = 0, False, None
+        self._notify(f"→ {n}  {title}")
+        self.tell_device(b"K")
 
     def gesture(self, kind: str, tap_window: str | None = None) -> None:
         """Single tap: Enter if eve has typed unsent text, else Tab (accepts
@@ -1017,6 +1112,8 @@ class App:
                         self.jobs.put(Job(-1, b"", True, kind="tap", window=active_window()))
                     elif ptype == "N":
                         self.jobs.put(Job(-1, b"", True, kind="double", window=active_window()))
+                    elif ptype == "M" and payload:
+                        self.jobs.put(Job(-1, b"", True, kind="multi", taps=payload[0], window=active_window()))
                     elif ptype == "E" and rec is not None:
                         dropped = struct.unpack("<I", payload)[0] if len(payload) == 4 else 0
                         if dropped:

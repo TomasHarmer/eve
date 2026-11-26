@@ -162,6 +162,7 @@ without this file no audio leaves your computer.
 | **Let go** | finishes and types the last phrase |
 | **Tap** | presses **Enter** to send what eve typed. With nothing waiting, presses **Tab** to accept Claude Code's suggestion, and the next tap sends it |
 | **Double-tap** | deletes the text eve typed that hasn't been sent yet. After a Tab, clears the whole prompt, suggestion included |
+| **Triple-tap**, then tap *N* times | switches to window *N*. The triple-tap shows a notification listing your windows with their numbers |
 
 **Text goes where you started.** eve remembers the window that had focus when
 you pressed the button. If you click somewhere else while it's still
@@ -171,7 +172,15 @@ tap to send, and move on straight away, even in the middle of a long phrase.
 This works per window: tabs inside one terminal or browser window look like a
 single window, so text goes to whichever tab is showing.
 
-A tap waits about a third of a second to make sure it isn't a double-tap.
+**Switching windows with the button.** Triple-tap and a notification lists
+your open windows, numbered oldest first, so a window keeps its number until
+you close it. Then, within 8 seconds, tap once for window 1, twice for window
+2, and so on. eve brings that window to the front with the cursor in it, ready
+to dictate. Talking, or picking a number that isn't on the list, closes the
+picker.
+
+A tap waits about a third of a second to make sure it isn't a double-tap, and
+a double-tap waits the same to make sure it isn't a triple.
 eve only tracks text it typed itself: if you type or edit by hand in between,
 a tap still sees "nothing waiting", and a double-tap deletes only as many
 characters as eve typed. Clearing after a Tab uses Claude Code's Ctrl+U, so it
@@ -187,6 +196,7 @@ The button light shows what's happening:
 | green flash | typed |
 | blue flash | tap (Enter or Tab) |
 | violet flash | double-tap (delete) |
+| white flash | triple-tap (window picker) |
 | red flash | something went wrong (see the log) |
 
 ### Bluetooth
