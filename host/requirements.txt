@@ -1,3 +1,4 @@
 faster-whisper
 pyserial
 numpy
+bleak

@@ -31,6 +31,7 @@ works in any app.
 - **Types in the right place:** text goes to the window you started in, even if
   you click somewhere else while it's still transcribing.
 - **Hands-free send and undo:** tap to press Enter (or Tab to accept a suggestion), double-tap to delete.
+- **USB or Bluetooth:** plug it in, or use it wirelessly over Bluetooth LE.
 - **Plug and go:** no drivers. It reconnects by itself, starts at login, and
   leaves your other dev boards alone.
 
@@ -60,6 +61,7 @@ no soldering:
 | Atech **Button** module (V2.0 for the RGB status light) | port 3 |
 | Atech **USB-C** module | port 4 |
 | A USB-C cable that carries **data** | — |
+| For wireless use: a USB-C power bank or charger | — |
 
 > On our units the microphone answered on the opposite port lines from the board
 > docs, and the firmware's pins match that. If you get silence, run the wiring
@@ -187,6 +189,32 @@ The button light shows what's happening:
 | violet flash | double-tap (delete) |
 | red flash | something went wrong (see the log) |
 
+### Bluetooth
+
+eve also works over Bluetooth LE, so the stick doesn't need a cable to your
+computer: power it from a USB-C power bank or charger instead. It carries the
+same button gestures and light as USB, with the audio compressed 4:1, and
+dictation is as fast as over USB.
+
+You don't need to pair it. Choose how eve reaches the stick with `--link`:
+
+| Mode | What it does |
+|---|---|
+| `--link auto` | the default. USB when the stick is plugged into the computer, Bluetooth when it isn't. Switches by itself when you plug or unplug it |
+| `--link usb` | USB only. eve never uses Bluetooth |
+| `--link ble` | Bluetooth only, even while the stick is plugged in (handy for trying it out) |
+
+```bash
+host/.venv/bin/python host/voicetype.py --model small.en --link ble
+host/install-autostart.sh --model small.en --link auto   # or set it for login
+```
+
+Your computer's Bluetooth must be on for `auto` and `ble`.
+
+> There's no pairing yet: while eve isn't connected, any nearby Bluetooth
+> device could connect to the stick and hear what it records. Only one
+> connection is allowed at a time, so once eve is connected nobody else can.
+
 ### Other boards on the same computer
 
 eve's app never grabs a board that isn't eve. The first time, it asks each
@@ -216,12 +244,17 @@ plugged in.
 | `--no-live` | type everything at once when you let go |
 | `--prompt "..."` | replace the vocabulary hint (words Whisper should expect) |
 | `--forget-device` | forget which boards are eve and look again |
+| `--link auto` | `auto` (default): USB when plugged in, else Bluetooth. `usb`: USB only. `ble`: Bluetooth only |
 | `--port /dev/ttyACM0` | use this port instead of finding eve automatically |
 | `--dry-run` | print the text instead of typing it |
 | `--save-wav last.wav` | keep the last recording, for checking the mic |
 | `-v` | also show the stick's log lines |
 
 ## Troubleshooting
+
+**Bluetooth doesn't connect.** Check that the computer's Bluetooth is on
+(`bluetoothctl show` says `Powered: yes`), and that the stick was flashed with
+the current firmware. Watch the log for `connected on Bluetooth`.
 
 **"waiting for the voice stick" forever.** The cable is probably charge-only,
 or the firmware isn't flashed. `ls /dev/ttyACM*` should show a device. If it
@@ -266,7 +299,7 @@ host/
 assets/logo.svg
 ```
 
-The USB protocol is small and documented at the top of `firmware/src/main.cpp`.
+The USB and Bluetooth protocol is small and documented at the top of `firmware/src/main.cpp`.
 It's a good starting point for a different front end, such as a macOS or
 Wayland typer.
 

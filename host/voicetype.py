@@ -5,7 +5,8 @@ voicetype — push-to-talk dictation from the Atech Tiny voice stick.
 Hold the stick's button and talk. Each phrase is typed into the window you
 started in as soon as you pause (X11, via xdotool); you don't have to let go
 first. Transcription runs locally with faster-whisper, with an optional cloud
-fallback (~/.config/eve/cloud.env) for when the computer is busy.
+fallback (~/.config/eve/cloud.env) for when the computer is busy. The stick
+connects over USB or Bluetooth LE: --link auto (default), usb or ble.
 
     host/.venv/bin/python host/voicetype.py                   # default: base.en, live
     host/.venv/bin/python host/voicetype.py --model small.en  # more accurate, ~3x slower
@@ -41,7 +42,7 @@ BYTES_PER_SEC = SAMPLE_RATE * 2
 MAGIC = b"\xa5\x5a"
 ESPRESSIF_VID = 0x303A
 MAX_PAYLOAD = 4096
-PACKET_TYPES = b"SDEANTH"
+PACKET_TYPES = b"SDEANTHC"
 STALL_SECONDS = 3.0  # a recording with no packets this long is finalized anyway
 
 CLEAR_LINES = 6  # Ctrl+U presses when clearing a prompt; each clears one line
@@ -150,6 +151,179 @@ def open_port(device: str) -> serial.Serial:
     except OSError:
         pass   # not a USB serial port (e.g. a virtual one): no control lines
     return s
+
+
+# ------------------------------------------------------------ Bluetooth LE link
+EVE_SVC_UUID = "7e5e0001-6576-6500-8000-00805f9b34fb"
+EVE_TX_UUID = "7e5e0002-6576-6500-8000-00805f9b34fb"   # device -> host, notify
+EVE_RX_UUID = "7e5e0003-6576-6500-8000-00805f9b34fb"   # host -> device, write
+
+_ble_loop = None
+
+
+def ble_loop():
+    """One asyncio loop, on its own thread, for all Bluetooth work."""
+    global _ble_loop
+    if _ble_loop is None:
+        import asyncio
+        _ble_loop = asyncio.new_event_loop()
+        threading.Thread(target=_ble_loop.run_forever, daemon=True, name="ble").start()
+    return _ble_loop
+
+
+def ble_available() -> bool:
+    try:
+        import bleak  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+BLE_FILE = os.path.expanduser("~/.config/eve/ble")   # address of the last eve seen over Bluetooth
+
+
+def _ble_still_connected(addr: str) -> bool:
+    """A connected stick doesn't advertise, so a scan can't see it. That
+    happens when the system's Bluetooth kept the link of an eve that was
+    stopped without closing it."""
+    try:
+        r = subprocess.run(["bluetoothctl", "info", addr], capture_output=True, text=True, timeout=3)
+        return "Connected: yes" in r.stdout
+    except Exception:
+        return False
+
+
+def find_ble(timeout: float = 4.0):
+    """Find eve over Bluetooth: ("ble", BLEDevice), or None."""
+    import asyncio
+    from bleak import BleakScanner
+
+    try:
+        last = open(BLE_FILE).read().strip()
+    except OSError:
+        last = ""
+    if last and _ble_still_connected(last):
+        # Drop the stale link so the stick advertises again and the scan finds it.
+        log.info("releasing a Bluetooth link to eve left over from before")
+        subprocess.run(["bluetoothctl", "disconnect", last], capture_output=True, timeout=10)
+        time.sleep(1)
+
+    async def scan():
+        return await BleakScanner.find_device_by_filter(
+            lambda d, ad: EVE_SVC_UUID in [u.lower() for u in ad.service_uuids], timeout=timeout)
+    try:
+        dev = asyncio.run_coroutine_threadsafe(scan(), ble_loop()).result(timeout + 5)
+    except Exception as e:
+        log.debug("Bluetooth scan failed (%s)", e)
+        return None
+    if dev is None:
+        return None
+    if dev.address != last:
+        os.makedirs(os.path.dirname(BLE_FILE), exist_ok=True)
+        with open(BLE_FILE, "w") as f:
+            f.write(dev.address + "\n")
+    return ("ble", dev)
+
+
+class BlePort:
+    """eve over Bluetooth LE, with just enough of serial.Serial's interface
+    (read, write, is_open, close) for the rest of the app to use it unchanged.
+    Notifications are one ordered byte stream carrying the usual packets."""
+
+    def __init__(self, device):
+        import asyncio
+        from bleak import BleakClient
+        self.name = f"Bluetooth {device.address}"
+        self.buf = bytearray()
+        self.cond = threading.Condition()
+        self.connected = False
+
+        def gone(_client):
+            with self.cond:
+                self.connected = False
+                self.cond.notify_all()
+
+        def on_data(_char, data: bytearray):
+            with self.cond:
+                self.buf += data
+                self.cond.notify_all()
+
+        async def connect():
+            self.client = BleakClient(device, disconnected_callback=gone)
+            await self.client.connect(timeout=10)
+            await self.client.start_notify(EVE_TX_UUID, on_data)
+        try:
+            asyncio.run_coroutine_threadsafe(connect(), ble_loop()).result(20)
+        except Exception as e:
+            raise serial.SerialException(f"Bluetooth connect failed: {e}") from e
+        self.connected = True
+
+    @property
+    def is_open(self) -> bool:
+        return self.connected
+
+    def read(self, n: int) -> bytes:
+        with self.cond:
+            if not self.buf and self.connected:
+                self.cond.wait(0.1)
+            if not self.buf and not self.connected:
+                raise serial.SerialException("Bluetooth link lost")
+            out = bytes(self.buf[:n])
+            del self.buf[:n]
+            return out
+
+    def write(self, data: bytes) -> None:
+        import asyncio
+        if self.connected:
+            asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(EVE_RX_UUID, data, response=False), ble_loop())
+
+    def close(self) -> None:
+        import asyncio
+        if getattr(self, "client", None) is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(self.client.disconnect(), ble_loop()).result(5)
+            except Exception:
+                pass
+        self.connected = False
+
+
+# IMA ADPCM, as the stick sends audio over Bluetooth ('C' packets).
+_IMA_STEP = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+    253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+    3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+    11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767]
+_IMA_INDEX = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+
+
+def adpcm_decode(payload: bytes) -> bytes:
+    """One 'C' block -> int16 LE PCM. Each block carries its own start state."""
+    if len(payload) < 5:
+        return b""
+    pred, index, n = struct.unpack_from("<hBH", payload)
+    index = min(max(index, 0), 88)
+    data = payload[5:]
+    n = min(n, len(data) * 2)
+    out = [0] * n
+    for i in range(n):
+        code = (data[i >> 1] >> 4) if i & 1 else (data[i >> 1] & 0x0F)
+        step = _IMA_STEP[index]
+        delta = step >> 3
+        if code & 4:
+            delta += step
+        if code & 2:
+            delta += step >> 1
+        if code & 1:
+            delta += step >> 2
+        pred = pred - delta if code & 8 else pred + delta
+        pred = 32767 if pred > 32767 else (-32768 if pred < -32768 else pred)
+        index = min(max(index + _IMA_INDEX[code], 0), 88)
+        out[i] = pred
+    return struct.pack(f"<{n}h", *out)
 
 
 def parse_packets(buf: bytearray):
@@ -754,20 +928,32 @@ class App:
     # -- serial loop with automatic reconnect
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
+        link = "usb" if self.args.port else self.args.link
+        self.use_ble = link != "usb" and ble_available()
+        if link == "ble" and not self.use_ble:
+            sys.exit("Bluetooth needs the bleak package: host/.venv/bin/pip install bleak")
+        log.info("link: %s", {"auto": "USB, or Bluetooth when unplugged", "usb": "USB only",
+                              "ble": "Bluetooth only"}[link] + ("" if self.use_ble or link == "usb"
+                                                                 else " (no bleak: USB only)"))
         waiting_logged = False
         not_eve: set = set()
         while True:
-            device = self.args.port or find_port(not_eve)
+            device = self.args.port or (None if link == "ble" else find_port(not_eve))
+            if not device and self.use_ble:
+                device = find_ble()
             if not device:
                 if not waiting_logged:
-                    log.info("waiting for the voice stick to be plugged in...")
+                    log.info("waiting for the voice stick (%s)...",
+                             "Bluetooth" if link == "ble" else
+                             "USB or Bluetooth" if self.use_ble else "plug it in")
                     waiting_logged = True
                 time.sleep(1)
                 continue
             try:
                 with self.port_lock:
-                    self.port = open_port(device)
-                log.info("connected on %s — hold the button and talk", device)
+                    self.port = open_port(device) if isinstance(device, str) else BlePort(device[1])
+                where = device if isinstance(device, str) else self.port.name
+                log.info("connected on %s — hold the button and talk", where)
                 waiting_logged = False
                 self.read_loop()
             except serial.SerialException as e:
@@ -801,6 +987,8 @@ class App:
                 buf += data
                 for ptype, payload in parse_packets(buf):
                     last_packet = time.time()
+                    if ptype == "C":   # compressed audio (Bluetooth)
+                        ptype, payload = "D", adpcm_decode(payload)
                     if ptype == "S":
                         if rec is not None:
                             log.warning("new recording before the last one ended; finishing it")
@@ -832,7 +1020,7 @@ class App:
                     elif ptype == "E" and rec is not None:
                         dropped = struct.unpack("<I", payload)[0] if len(payload) == 4 else 0
                         if dropped:
-                            log.warning("device dropped %d samples (USB too slow?)", dropped)
+                            log.warning("device dropped %d samples (link too slow?)", dropped)
                         finish()
             elif rec is not None and time.time() - last_packet > STALL_SECONDS:
                 log.warning("stream stalled; transcribing what arrived")
@@ -852,6 +1040,9 @@ def main() -> None:
     ap.add_argument("--model", default=os.environ.get("VOICETYPE_MODEL", "base.en"),
                     help="faster-whisper model: tiny.en, base.en (default), small.en (more accurate, ~3x slower), medium.en")
     ap.add_argument("--port", help="serial device (default: find eve among the connected boards)")
+    ap.add_argument("--link", choices=("auto", "usb", "ble"), default=os.environ.get("EVE_LINK", "auto"),
+                    help="how to reach the stick: auto (default: USB when plugged in, else Bluetooth), "
+                         "usb (USB only), ble (Bluetooth only, even when plugged in)")
     ap.add_argument("--forget-device", action="store_true",
                     help="forget which boards are eve (~/.config/eve/device) and search again")
     ap.add_argument("--enter", action="store_true", help="press Enter when you release the button (sends it to Claude)")
@@ -885,10 +1076,18 @@ def main() -> None:
     if not os.environ.get("DISPLAY") and not args.dry_run:
         sys.exit("DISPLAY is not set — run this inside your X11 session")
 
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    app = App(args)
     try:
-        App(args).run()
+        app.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        # Release the Bluetooth link, or the system keeps it and the stick
+        # stops advertising until it times out.
+        if isinstance(app.port, BlePort):
+            app.port.close()
 
 
 if __name__ == "__main__":

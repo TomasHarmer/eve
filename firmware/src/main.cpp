@@ -18,8 +18,17 @@
  *     'A'  recording aborted — it was only a tap; discard it (len 0)
  *     'T'  single tap                   (len 0)  host: Enter if text waiting, else Tab
  *     'N'  double tap                   (len 0)  host: delete the waiting text
+ *     'C'  audio, IMA-ADPCM compressed (BLE only; USB sends 'D'):
+ *          int16 predictor, uint8 step index, uint16 sample count, then
+ *          4-bit codes, low nibble first. Each block decodes on its own.
  *   Driver log lines ("[Button] Pressed" etc.) may appear *between* packets;
  *   the host skips anything that isn't a packet.
+ *
+ * Bluetooth LE carries exactly the same packets, as a byte stream: the host
+ * subscribes to the TX characteristic (notifications) and writes the
+ * host -> device bytes below to the RX characteristic. While a BLE host is
+ * subscribed, all packets go over BLE instead of USB. Audio is ADPCM there
+ * (64 kbit/s instead of 256), which BLE carries comfortably.
  *
  * Host -> device (single bytes, drive the button light):
  *   'B' busy/transcribing (amber)   'K' done (green flash)
@@ -33,6 +42,8 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "esp_task_wdt.h"
+
+#include <NimBLEDevice.h>
 
 #include "modules/microphone.h"
 #include "modules/button.h"
@@ -82,6 +93,93 @@ static void onMicAudio(const int16_t* samples, int count, void* /*ctx*/) {
     }
 }
 
+// ---- Bluetooth LE ------------------------------------------------------------
+// UUIDs: eve's own service (any random 128-bit base would do).
+#define EVE_SVC_UUID "7e5e0001-6576-6500-8000-00805f9b34fb"
+#define EVE_TX_UUID  "7e5e0002-6576-6500-8000-00805f9b34fb"   // device -> host, notify
+#define EVE_RX_UUID  "7e5e0003-6576-6500-8000-00805f9b34fb"   // host -> device, write
+
+static NimBLECharacteristic* bleTx = nullptr;
+static volatile bool     bleSubscribed = false;
+static volatile uint16_t bleConn = 0xFFFF;
+static QueueHandle_t     bleRx = nullptr;          // host -> device bytes
+
+class EveServerCB : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* s, ble_gap_conn_desc* d) override {
+        bleConn = d->conn_handle;
+        // Ask for a short connection interval (7.5-15 ms): low latency audio.
+        s->updateConnParams(d->conn_handle, 6, 12, 0, 400);
+    }
+    void onDisconnect(NimBLEServer* /*s*/) override {
+        bleSubscribed = false;
+        bleConn = 0xFFFF;
+        NimBLEDevice::startAdvertising();
+    }
+};
+
+class EveTxCB : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic* /*c*/, ble_gap_conn_desc* /*d*/, uint16_t sub) override {
+        bleSubscribed = (sub & 1) != 0;
+    }
+};
+
+class EveRxCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* c) override {
+        std::string v = c->getValue();
+        for (char ch : v) xQueueSend(bleRx, &ch, 0);
+    }
+};
+
+static void bleBegin() {
+    bleRx = xQueueCreate(64, 1);
+    NimBLEDevice::init("eve");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setMTU(247);
+    NimBLEServer* server = NimBLEDevice::createServer();
+    server->setCallbacks(new EveServerCB());
+    NimBLEService* svc = server->createService(EVE_SVC_UUID);
+    bleTx = svc->createCharacteristic(EVE_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
+    bleTx->setCallbacks(new EveTxCB());
+    NimBLECharacteristic* rx = svc->createCharacteristic(
+        EVE_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    rx->setCallbacks(new EveRxCB());
+    svc->start();
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    adv->addServiceUUID(EVE_SVC_UUID);
+    adv->setScanResponse(true);   // the name goes in the scan response
+    NimBLEDevice::startAdvertising();
+}
+
+// One notification, retrying briefly while the stack is out of buffers.
+static bool bleNotify(const uint8_t* p, size_t n) {
+    uint32_t t0 = millis();
+    while (true) {
+        uint16_t conn = bleConn;
+        if (!bleSubscribed || conn == 0xFFFF) return false;
+        struct os_mbuf* om = ble_hs_mbuf_from_flat(p, n);
+        if (om) {
+            int rc = ble_gattc_notify_custom(conn, bleTx->getHandle(), om);   // consumes om
+            if (rc == 0) return true;
+            if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EBUSY) return false;
+        }
+        if (millis() - t0 > 100) return false;
+        vTaskDelay(1);
+    }
+}
+
+static bool bleWrite(const uint8_t* p, size_t n) {
+    NimBLEServer* s = NimBLEDevice::getServer();
+    uint16_t conn = bleConn;
+    size_t chunk = (s && conn != 0xFFFF) ? s->getPeerMTU(conn) : 23;
+    chunk = chunk > 3 ? chunk - 3 : 20;
+    for (size_t off = 0; off < n; off += chunk) {
+        if (!bleNotify(p + off, min(chunk, n - off))) return false;
+    }
+    return true;
+}
+
+static inline bool useBle() { return bleSubscribed; }
+
 // ---- USB output -------------------------------------------------------------
 // Write everything or give up after a short wait (host not reading). A partial
 // packet is harmless: the host resyncs on the next magic header.
@@ -100,21 +198,74 @@ static bool writeAll(const uint8_t* p, size_t n) {
 }
 
 static bool sendPacket(char type, const uint8_t* payload, uint16_t len) {
-    uint8_t hdr[5] = {0xA5, 0x5A, (uint8_t)type, (uint8_t)(len & 0xFF), (uint8_t)(len >> 8)};
-    if (!writeAll(hdr, sizeof(hdr))) return false;
-    if (len && !writeAll(payload, len)) return false;
-    return true;
+    static uint8_t pkt[5 + PACKET_BYTES];
+    if (len > PACKET_BYTES) return false;
+    pkt[0] = 0xA5; pkt[1] = 0x5A; pkt[2] = (uint8_t)type;
+    pkt[3] = (uint8_t)(len & 0xFF); pkt[4] = (uint8_t)(len >> 8);
+    if (len) memcpy(pkt + 5, payload, len);
+    return useBle() ? bleWrite(pkt, 5 + len) : writeAll(pkt, 5 + len);
 }
 
+// ---- IMA ADPCM (for BLE) ----------------------------------------------------
+static const int16_t IMA_STEP[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+    253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+    3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+    11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767};
+static const int8_t IMA_INDEX[16] = {-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8};
+static int32_t adpcmPred = 0;
+static int     adpcmIndex = 0;
+
+// Encodes n samples into out (header + ceil(n/2) bytes). Returns its length.
+static size_t adpcmEncode(const int16_t* in, size_t n, uint8_t* out) {
+    out[0] = (uint8_t)(adpcmPred & 0xFF); out[1] = (uint8_t)((adpcmPred >> 8) & 0xFF);
+    out[2] = (uint8_t)adpcmIndex;
+    out[3] = (uint8_t)(n & 0xFF); out[4] = (uint8_t)(n >> 8);
+    uint8_t* d = out + 5;
+    for (size_t i = 0; i < n; i++) {
+        int step = IMA_STEP[adpcmIndex];
+        int diff = in[i] - adpcmPred;
+        int code = 0;
+        if (diff < 0) { code = 8; diff = -diff; }
+        int delta = step >> 3;
+        if (diff >= step)        { code |= 4; diff -= step; delta += step; }
+        if (diff >= (step >> 1)) { code |= 2; diff -= step >> 1; delta += step >> 1; }
+        if (diff >= (step >> 2)) { code |= 1; delta += step >> 2; }
+        adpcmPred += (code & 8) ? -delta : delta;
+        if (adpcmPred > 32767) adpcmPred = 32767;
+        if (adpcmPred < -32768) adpcmPred = -32768;
+        adpcmIndex += IMA_INDEX[code];
+        if (adpcmIndex < 0) adpcmIndex = 0;
+        if (adpcmIndex > 88) adpcmIndex = 88;
+        if (i & 1) d[i >> 1] |= (uint8_t)(code << 4);
+        else       d[i >> 1] = (uint8_t)code;
+    }
+    return 5 + (n + 1) / 2;
+}
+
+static const size_t ADPCM_SAMPLES = 400;   // 25 ms per 'C' packet (205 bytes)
+
 static void drainAudio() {
-    static uint8_t chunk[PACKET_BYTES];
+    static uint8_t chunk[PACKET_BYTES] __attribute__((aligned(4)));   // read as int16
+    static uint8_t coded[5 + ADPCM_SAMPLES / 2 + 1];
     // Bound the work per loop so the watchdog and button stay serviced.
     for (int i = 0; i < 8; i++) {
         size_t avail = xStreamBufferBytesAvailable(audioStream);
         if (avail < 2) return;
-        size_t want = min(avail, PACKET_BYTES) & ~(size_t)1;   // keep it even
-        size_t got = xStreamBufferReceive(audioStream, chunk, want, 0);
-        if (got) sendPacket('D', chunk, (uint16_t)got);
+        if (useBle()) {
+            // Whole blocks while recording; the remainder once capture stopped.
+            if (avail < ADPCM_SAMPLES * 2 && capturing) return;
+            size_t want = min(avail, ADPCM_SAMPLES * 2) & ~(size_t)1;
+            size_t got = xStreamBufferReceive(audioStream, chunk, want, 0) & ~(size_t)1;
+            if (got) sendPacket('C', coded, (uint16_t)adpcmEncode((const int16_t*)chunk, got / 2, coded));
+        } else {
+            size_t want = min(avail, PACKET_BYTES) & ~(size_t)1;   // keep it even
+            size_t got = xStreamBufferReceive(audioStream, chunk, want, 0);
+            if (got) sendPacket('D', chunk, (uint16_t)got);
+        }
     }
 }
 
@@ -145,9 +296,16 @@ static void serviceLight() {
     if (lightState == L_BUSY  && age > HOST_WAIT_MS) setLight(L_IDLE);
 }
 
+static int nextHostByte() {
+    if (Serial.available() > 0) return Serial.read();
+    char c;
+    if (bleRx && xQueueReceive(bleRx, &c, 0) == pdTRUE) return (uint8_t)c;
+    return -1;
+}
+
 static void readHost() {
-    while (Serial.available() > 0) {
-        int c = Serial.read();
+    int c;
+    while ((c = nextHostByte()) >= 0) {
         if (c == '?') {                             // "who are you?" from the host
             sendPacket('H', (const uint8_t*)"eve", 3);
             continue;
@@ -175,6 +333,8 @@ static void startRecording() {
     capturing = false;
     xStreamBufferReset(audioStream);
     droppedSamples = 0;
+    adpcmPred = 0;
+    adpcmIndex = 0;
     sendPacket('S', nullptr, 0);
     recording = true;
     tailing   = false;
@@ -185,8 +345,7 @@ static void startRecording() {
 
 static void finishRecording() {
     capturing = false;
-    drainAudio();
-    drainAudio();
+    for (int i = 0; i < 4; i++) drainAudio();
     uint32_t dropped = droppedSamples;
     sendPacket('E', (const uint8_t*)&dropped, sizeof(dropped));
     recording = false;
@@ -293,6 +452,8 @@ void setup() {
     button.setBrightnessCap(120);   // bright enough to see while walking around
     button.setBrightness(120);
     button.off();
+
+    bleBegin();
 
     mic.onAudio(onMicAudio, nullptr);
     mic.begin();   // LR low = left slot, which is the slot the driver reads (verified)
